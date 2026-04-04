@@ -1,189 +1,166 @@
-import numpy as np
-import torch
 import os
-import h5py
-from torch.utils.data import TensorDataset, DataLoader
+import torch
+import numpy as np
+import logging
+import matplotlib.pyplot as plt
+from datetime import datetime
 
-import IPython
-e = IPython.embed
+# ===================== 日志配置 =====================
+def setup_logger(log_dir, exp_name):
+    """设置日志记录器"""
+    logger = logging.getLogger(exp_name)
+    logger.setLevel(logging.INFO)
+    
+    # 控制台输出
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch_formatter = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    ch.setFormatter(ch_formatter)
+    
+    # 文件输出
+    log_file = os.path.join(log_dir, f"train_{exp_name}.log")
+    fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+    fh.setLevel(logging.INFO)
+    fh_formatter = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    fh.setFormatter(fh_formatter)
+    
+    logger.addHandler(ch)
+    logger.addHandler(fh)
+    return logger
 
-class EpisodicDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats):
-        super(EpisodicDataset).__init__()
-        self.episode_ids = episode_ids
-        self.dataset_dir = dataset_dir
-        self.camera_names = camera_names
-        self.norm_stats = norm_stats
-        self.is_sim = None
-        self.__getitem__(0) # initialize self.is_sim
+# ===================== 可视化工具 =====================
+def plot_training_curves(train_metrics, val_metrics, val_obst_metrics, save_path):
+    """
+    绘制训练/验证损失曲线
+    Args:
+        train_metrics: 训练指标字典，key为指标名，value为列表
+        val_metrics: 普通轨迹验证指标
+        val_obst_metrics: 障碍轨迹验证指标
+        save_path: 保存路径
+    """
+    plt.style.use("seaborn-v0_8")
+    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+    
+    # 1. 总损失曲线
+    ax1 = axes[0]
+    epochs = range(1, len(train_metrics["loss"]) + 1)
+    ax1.plot(epochs, train_metrics["loss"], label="Train Loss", color="blue", linewidth=2)
+    ax1.plot(epochs, val_metrics["loss"], label="Val (Normal) Loss", color="orange", linewidth=2)
+    ax1.plot(epochs, val_obst_metrics["loss"], label="Val (Obstacle) Loss", color="red", linewidth=2)
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Loss")
+    ax1.set_title("Training/Validation Loss Curve")
+    ax1.legend()
+    ax1.grid(True)
+    
+    # 2. 细分指标（ACTPolicy显示L1+KL，CNNMLPPolicy显示MSE）
+    ax2 = axes[1]
+    if "l1" in train_metrics:
+        # ACTPolicy
+        ax2.plot(epochs, train_metrics["l1"], label="Train L1 Loss", color="green", linewidth=2)
+        ax2.plot(epochs, val_metrics["l1"], label="Val (Normal) L1 Loss", color="purple", linewidth=2)
+        ax2.plot(epochs, val_obst_metrics["l1"], label="Val (Obstacle) L1 Loss", color="brown", linewidth=2)
+        
+        ax2_twin = ax2.twinx()
+        ax2_twin.plot(epochs, train_metrics["kl"], label="Train KL Loss", color="cyan", linewidth=2, linestyle="--")
+        ax2_twin.plot(epochs, val_metrics["kl"], label="Val (Normal) KL Loss", color="magenta", linewidth=2, linestyle="--")
+        ax2_twin.plot(epochs, val_obst_metrics["kl"], label="Val (Obstacle) KL Loss", color="gray", linewidth=2, linestyle="--")
+        
+        ax2.set_ylabel("L1 Loss")
+        ax2_twin.set_ylabel("KL Loss")
+        # 合并图例
+        lines1, labels1 = ax2.get_legend_handles_labels()
+        lines2, labels2 = ax2_twin.get_legend_handles_labels()
+        ax2.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
+    else:
+        # CNNMLPPolicy
+        ax2.plot(epochs, train_metrics["mse"], label="Train MSE Loss", color="green", linewidth=2)
+        ax2.plot(epochs, val_metrics["mse"], label="Val (Normal) MSE Loss", color="purple", linewidth=2)
+        ax2.plot(epochs, val_obst_metrics["mse"], label="Val (Obstacle) MSE Loss", color="brown", linewidth=2)
+        ax2.set_xlabel("Epoch")
+        ax2.set_ylabel("MSE Loss")
+        ax2.legend()
+        ax2.grid(True)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_path, "training_curves.png"), dpi=300, bbox_inches="tight")
+    plt.close()
 
-    def __len__(self):
-        return len(self.episode_ids)
+# ===================== 模型保存/加载 =====================
+def save_checkpoint(epoch, model, optimizer, config, metrics, is_best, save_dir):
+    """
+    保存模型检查点
+    Args:
+        epoch: 当前轮数
+        model: 模型实例
+        optimizer: 优化器
+        config: 配置实例
+        metrics: 当前指标
+        is_best: 是否为最优模型
+        save_dir: 保存目录
+    """
+    ckpt = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "config": {k: v for k, v in config.__dict__.items() if not k.startswith("__")},
+        "metrics": metrics,
+        "best_loss": metrics["best_loss"] if "best_loss" in metrics else metrics["loss"]
+    }
+    
+    # 保存普通ckpt
+    ckpt_path = os.path.join(save_dir, f"ckpt_epoch_{epoch}.pth")
+    torch.save(ckpt, ckpt_path)
+    
+    # 保存最优模型
+    if is_best:
+        best_ckpt_path = os.path.join(save_dir, "best_model.pth")
+        torch.save(ckpt, best_ckpt_path)
+    
+    return ckpt_path
 
-    def __getitem__(self, index):
-        sample_full_episode = False # hardcode
+def load_checkpoint(ckpt_path, model, optimizer):
+    """
+    加载模型检查点
+    Args:
+        ckpt_path: 检查点路径
+        model: 模型实例
+        optimizer: 优化器实例
+    Returns:
+        ckpt: 检查点字典
+    """
+    ckpt = torch.load(ckpt_path, map_location="cuda" if torch.cuda.is_available() else "cpu")
+    model.load_state_dict(ckpt["model_state_dict"])
+    if optimizer is not None:
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    return ckpt
 
-        episode_id = self.episode_ids[index]
-        dataset_path = os.path.join(self.dataset_dir, f'episode_{episode_id}.hdf5')
-        with h5py.File(dataset_path, 'r') as root:
-            is_sim = root.attrs['sim']
-            original_action_shape = root['/action'].shape
-            episode_len = original_action_shape[0]
-            if sample_full_episode:
-                start_ts = 0
-            else:
-                start_ts = np.random.choice(episode_len)
-            # get observation at start_ts only
-            qpos = root['/observations/qpos'][start_ts]
-            qvel = root['/observations/qvel'][start_ts]
-            image_dict = dict()
-            for cam_name in self.camera_names:
-                image_dict[cam_name] = root[f'/observations/images/{cam_name}'][start_ts]
-            # get all actions after and including start_ts
-            if is_sim:
-                action = root['/action'][start_ts:]
-                action_len = episode_len - start_ts
-            else:
-                action = root['/action'][max(0, start_ts - 1):] # hack, to make timesteps more aligned
-                action_len = episode_len - max(0, start_ts - 1) # hack, to make timesteps more aligned
+# ===================== 指标计算 =====================
+def compute_metrics(loss_dict):
+    """
+    计算批次指标（平均）
+    Args:
+        loss_dict: 损失字典
+    Returns:
+        avg_metrics: 平均指标字典
+    """
+    avg_metrics = {}
+    for k, v in loss_dict.items():
+        if isinstance(v, torch.Tensor):
+            avg_metrics[k] = v.item()
+        else:
+            avg_metrics[k] = v
+    return avg_metrics
 
-        self.is_sim = is_sim
-        padded_action = np.zeros(original_action_shape, dtype=np.float32)
-        padded_action[:action_len] = action
-        is_pad = np.zeros(episode_len)
-        is_pad[action_len:] = 1
-
-        # new axis for different cameras
-        all_cam_images = []
-        for cam_name in self.camera_names:
-            all_cam_images.append(image_dict[cam_name])
-        all_cam_images = np.stack(all_cam_images, axis=0)
-
-        # construct observations
-        image_data = torch.from_numpy(all_cam_images)
-        qpos_data = torch.from_numpy(qpos).float()
-        action_data = torch.from_numpy(padded_action).float()
-        is_pad = torch.from_numpy(is_pad).bool()
-
-        # channel last
-        image_data = torch.einsum('k h w c -> k c h w', image_data)
-
-        # normalize image and change dtype to float
-        image_data = image_data / 255.0
-        action_data = (action_data - self.norm_stats["action_mean"]) / self.norm_stats["action_std"]
-        qpos_data = (qpos_data - self.norm_stats["qpos_mean"]) / self.norm_stats["qpos_std"]
-
-        return image_data, qpos_data, action_data, is_pad
-
-
-def get_norm_stats(dataset_dir, num_episodes):
-    all_qpos_data = []
-    all_action_data = []
-    for episode_idx in range(num_episodes):
-        dataset_path = os.path.join(dataset_dir, f'episode_{episode_idx}.hdf5')
-        with h5py.File(dataset_path, 'r') as root:
-            qpos = root['/observations/qpos'][()]
-            qvel = root['/observations/qvel'][()]
-            action = root['/action'][()]
-        all_qpos_data.append(torch.from_numpy(qpos))
-        all_action_data.append(torch.from_numpy(action))
-    all_qpos_data = torch.stack(all_qpos_data)
-    all_action_data = torch.stack(all_action_data)
-    all_action_data = all_action_data
-
-    # normalize action data
-    action_mean = all_action_data.mean(dim=[0, 1], keepdim=True)
-    action_std = all_action_data.std(dim=[0, 1], keepdim=True)
-    action_std = torch.clip(action_std, 1e-2, np.inf) # clipping
-
-    # normalize qpos data
-    qpos_mean = all_qpos_data.mean(dim=[0, 1], keepdim=True)
-    qpos_std = all_qpos_data.std(dim=[0, 1], keepdim=True)
-    qpos_std = torch.clip(qpos_std, 1e-2, np.inf) # clipping
-
-    stats = {"action_mean": action_mean.numpy().squeeze(), "action_std": action_std.numpy().squeeze(),
-             "qpos_mean": qpos_mean.numpy().squeeze(), "qpos_std": qpos_std.numpy().squeeze(),
-             "example_qpos": qpos}
-
-    return stats
-
-
-def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val):
-    print(f'\nData from: {dataset_dir}\n')
-    # obtain train test split
-    train_ratio = 0.8
-    shuffled_indices = np.random.permutation(num_episodes)
-    train_indices = shuffled_indices[:int(train_ratio * num_episodes)]
-    val_indices = shuffled_indices[int(train_ratio * num_episodes):]
-
-    # obtain normalization stats for qpos and action
-    norm_stats = get_norm_stats(dataset_dir, num_episodes)
-
-    # construct dataset and dataloader
-    train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats)
-    val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
-
-    return train_dataloader, val_dataloader, norm_stats, train_dataset.is_sim
-
-
-### env utils
-
-def sample_box_pose():
-    x_range = [0.0, 0.2]
-    y_range = [0.4, 0.6]
-    z_range = [0.05, 0.05]
-
-    ranges = np.vstack([x_range, y_range, z_range])
-    cube_position = np.random.uniform(ranges[:, 0], ranges[:, 1])
-
-    cube_quat = np.array([1, 0, 0, 0])
-    return np.concatenate([cube_position, cube_quat])
-
-def sample_insertion_pose():
-    # Peg
-    x_range = [0.1, 0.2]
-    y_range = [0.4, 0.6]
-    z_range = [0.05, 0.05]
-
-    ranges = np.vstack([x_range, y_range, z_range])
-    peg_position = np.random.uniform(ranges[:, 0], ranges[:, 1])
-
-    peg_quat = np.array([1, 0, 0, 0])
-    peg_pose = np.concatenate([peg_position, peg_quat])
-
-    # Socket
-    x_range = [-0.2, -0.1]
-    y_range = [0.4, 0.6]
-    z_range = [0.05, 0.05]
-
-    ranges = np.vstack([x_range, y_range, z_range])
-    socket_position = np.random.uniform(ranges[:, 0], ranges[:, 1])
-
-    socket_quat = np.array([1, 0, 0, 0])
-    socket_pose = np.concatenate([socket_position, socket_quat])
-
-    return peg_pose, socket_pose
-
-### helper functions
-
-def compute_dict_mean(epoch_dicts):
-    result = {k: None for k in epoch_dicts[0]}
-    num_items = len(epoch_dicts)
-    for k in result:
-        value_sum = 0
-        for epoch_dict in epoch_dicts:
-            value_sum += epoch_dict[k]
-        result[k] = value_sum / num_items
-    return result
-
-def detach_dict(d):
-    new_d = dict()
-    for k, v in d.items():
-        new_d[k] = v.detach()
-    return new_d
-
-def set_seed(seed):
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+def aggregate_metrics(metrics_list):
+    """
+    聚合多个批次的指标
+    Args:
+        metrics_list: 指标列表（每个元素是批次指标字典）
+    Returns:
+        agg_metrics: 聚合后的指标字典（平均值）
+    """
+    agg_metrics = {}
+    for k in metrics_list[0].keys():
+        agg_metrics[k] = np.mean([m[k] for m in metrics_list])
+    return agg_metrics

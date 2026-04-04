@@ -1,0 +1,269 @@
+import os
+import torch
+import numpy as np
+from tqdm import tqdm
+
+# 导入自定义模块
+from config import cfg
+from utils import setup_logger, plot_training_curves, save_checkpoint, load_checkpoint, compute_metrics, aggregate_metrics
+from data_process.data_loader import get_data_loaders
+from act.policy import ACTPolicy, CNNMLPPolicy
+
+# 设置随机种子
+torch.manual_seed(cfg.SEED)
+np.random.seed(cfg.SEED)
+if cfg.USE_CUDA:
+    torch.cuda.manual_seed(cfg.SEED)
+
+# 初始化日志
+logger = setup_logger(cfg.EXP_LOG_DIR, cfg.EXP_NAME)
+
+def init_model_and_optimizer(config):
+    """初始化模型和优化器"""
+    args_override = {
+        "lr": config.LR,
+        "lr_backbone": config.LR_BACKBONE,
+        "lr_me": config.LR_ME,
+        "weight_decay": config.WEIGHT_DECAY,
+        "kl_weight": config.KL_WEIGHT,
+        **config.MODEL_PARAMS
+    }
+    
+    if config.POLICY_CLASS == "ACTPolicy":
+        policy = ACTPolicy(args_override)
+    elif config.POLICY_CLASS == "CNNMLPPolicy":
+        policy = CNNMLPPolicy(args_override)
+    else:
+        raise ValueError(f"不支持的策略类型: {config.POLICY_CLASS}")
+    
+    if config.USE_CUDA:
+        policy = policy.cuda()
+    
+    optimizer = policy.configure_optimizers()
+    return policy, optimizer
+
+def train_one_epoch(model, train_loader, optimizer, epoch, config, logger):
+    """训练一个epoch"""
+    model.train()
+    train_metrics_list = []
+    total_batches = len(train_loader)
+    
+    pbar = tqdm(enumerate(train_loader), total=total_batches, desc=f"Train Epoch {epoch}")
+    for batch_idx, (imgs, currs, futures, m_imgs, obsts) in pbar:
+        # 数据移到GPU
+        if config.USE_CUDA:
+            imgs = imgs.cuda()
+            currs = currs.cuda()
+            futures = futures.cuda()
+            m_imgs = m_imgs.cuda()
+        
+        # 前向传播
+        optimizer.zero_grad()
+        if config.POLICY_CLASS == "ACTPolicy":
+            # ACTPolicy需要memory_image和is_pad（这里is_pad设为全False）
+            is_pad = torch.zeros((futures.shape[0], futures.shape[1]), dtype=torch.bool)
+            if config.USE_CUDA:
+                is_pad = is_pad.cuda()
+            loss_dict = model(
+                qpos=currs,
+                image=imgs,
+                memory_image=m_imgs,
+                actions=futures,
+                is_pad=is_pad
+            )
+        else:
+            # CNNMLPPolicy
+            loss_dict = model(
+                qpos=currs,
+                image=imgs,
+                actions=futures[:, 0]  # 只取第一个未来步
+            )
+        
+        # 反向传播
+        loss = loss_dict["loss"]
+        loss.backward()
+        optimizer.step()
+        
+        # 记录指标
+        batch_metrics = compute_metrics(loss_dict)
+        train_metrics_list.append(batch_metrics)
+        
+        # 打印日志
+        if (batch_idx + 1) % config.LOG_PRINT_FREQ == 0 or batch_idx == total_batches - 1:
+            log_str = f"Epoch {epoch} | Batch {batch_idx+1}/{total_batches} | "
+            log_str += " | ".join([f"{k}: {v:.4f}" for k, v in batch_metrics.items()])
+            logger.info(log_str)
+            pbar.set_postfix(**batch_metrics)
+    
+    # 聚合训练指标
+    train_metrics = aggregate_metrics(train_metrics_list)
+    logger.info(f"===== Train Epoch {epoch} Summary =====")
+    logger.info(" | ".join([f"{k}: {v:.4f}" for k, v in train_metrics.items()]))
+    return train_metrics
+
+def validate(model, val_loader, config, logger, is_obst=False):
+    """验证（区分普通/障碍轨迹）"""
+    model.eval()
+    val_metrics_list = []
+    total_batches = len(val_loader)
+    
+    pbar = tqdm(enumerate(val_loader), total=total_batches, desc=f"Val (Obst={is_obst}) Epoch")
+    with torch.no_grad():
+        for batch_idx, (imgs, currs, futures, m_imgs, obsts) in pbar:
+            # 筛选障碍/普通轨迹
+            if is_obst:
+                mask = obsts.squeeze(1).bool()
+                if mask.sum() == 0:
+                    continue
+                imgs = imgs[mask]
+                currs = currs[mask]
+                futures = futures[mask]
+                m_imgs = m_imgs[mask]
+            else:
+                mask = ~obsts.squeeze(1).bool()
+                if mask.sum() == 0:
+                    continue
+                imgs = imgs[mask]
+                currs = currs[mask]
+                futures = futures[mask]
+                m_imgs = m_imgs[mask]
+            
+            if len(imgs) == 0:
+                continue
+            
+            # 数据移到GPU
+            if config.USE_CUDA:
+                imgs = imgs.cuda()
+                currs = currs.cuda()
+                futures = futures.cuda()
+                m_imgs = m_imgs.cuda()
+            
+            # 前向传播
+            if config.POLICY_CLASS == "ACTPolicy":
+                is_pad = torch.zeros((futures.shape[0], futures.shape[1]), dtype=torch.bool)
+                if config.USE_CUDA:
+                    is_pad = is_pad.cuda()
+                loss_dict = model(
+                    qpos=currs,
+                    image=imgs,
+                    memory_image=m_imgs,
+                    actions=futures,
+                    is_pad=is_pad
+                )
+            else:
+                loss_dict = model(
+                    qpos=currs,
+                    image=imgs,
+                    actions=futures[:, 0]
+                )
+            
+            # 记录指标
+            batch_metrics = compute_metrics(loss_dict)
+            val_metrics_list.append(batch_metrics)
+            pbar.set_postfix(**batch_metrics)
+    
+    # 聚合验证指标
+    if len(val_metrics_list) == 0:
+        val_metrics = {k: 0.0 for k in ["loss"] + (["l1", "kl"] if config.POLICY_CLASS == "ACTPolicy" else ["mse"])}
+    else:
+        val_metrics = aggregate_metrics(val_metrics_list)
+    
+    # 打印日志
+    logger.info(f"===== Val (Obst={is_obst}) Summary =====")
+    logger.info(" | ".join([f"{k}: {v:.4f}" for k, v in val_metrics.items()]))
+    return val_metrics
+
+def main():
+    # 1. 初始化数据加载器
+    logger.info("===== 加载数据集 =====")
+    train_loader, val_loader = get_data_loaders(
+        data_root=cfg.DATA_ROOT,
+        future_steps=cfg.FUTURE_STEPS,
+        batch_size=cfg.BATCH_SIZE,
+        num_workers=cfg.NUM_WORKERS
+    )
+    
+    # 2. 初始化模型和优化器
+    logger.info("===== 初始化模型 =====")
+    model, optimizer = init_model_and_optimizer(cfg)
+    start_epoch = 1
+    best_val_loss = float("inf")
+    
+    # 3. 断点续训处理
+    if cfg.TRAIN_MODE == "resume":
+        if not os.path.exists(cfg.RESUME_CKPT_PATH):
+            raise FileNotFoundError(f"断点续训文件不存在: {cfg.RESUME_CKPT_PATH}")
+        logger.info(f"===== 加载断点: {cfg.RESUME_CKPT_PATH} =====")
+        ckpt = load_checkpoint(cfg.RESUME_CKPT_PATH, model, optimizer)
+        start_epoch = ckpt["epoch"] + 1
+        best_val_loss = ckpt["best_loss"]
+        # 更新配置
+        cfg.update_from_ckpt(ckpt["config"])
+        logger.info(f"断点续训，从Epoch {start_epoch} 开始")
+    
+    # 4. 训练过程记录
+    train_metrics_history = {k: [] for k in ["loss"] + (["l1", "kl"] if cfg.POLICY_CLASS == "ACTPolicy" else ["mse"])}
+    val_metrics_history = {k: [] for k in train_metrics_history.keys()}
+    val_obst_metrics_history = {k: [] for k in train_metrics_history.keys()}
+    
+    # 5. 开始训练
+    logger.info("===== 开始训练 =====")
+    for epoch in range(start_epoch, cfg.NUM_EPOCHS + 1):
+        # 训练
+        train_metrics = train_one_epoch(model, train_loader, optimizer, epoch, cfg, logger)
+        
+        # 记录训练指标
+        for k in train_metrics_history.keys():
+            train_metrics_history[k].append(train_metrics.get(k, 0.0))
+        
+        # 验证
+        if epoch % cfg.VAL_FREQ == 0 or epoch == cfg.NUM_EPOCHS:
+            # 普通轨迹验证
+            val_metrics = validate(model, val_loader, cfg, logger, is_obst=False)
+            # 障碍轨迹验证
+            val_obst_metrics = validate(model, val_loader, cfg, logger, is_obst=True)
+            
+            # 记录验证指标
+            for k in val_metrics_history.keys():
+                val_metrics_history[k].append(val_metrics.get(k, 0.0))
+                val_obst_metrics_history[k].append(val_obst_metrics.get(k, 0.0))
+            
+            # 保存可视化
+            if cfg.SAVE_PLOT:
+                plot_training_curves(
+                    train_metrics_history,
+                    val_metrics_history,
+                    val_obst_metrics_history,
+                    cfg.EXP_LOG_DIR
+                )
+            
+            # 检查是否为最优模型
+            current_val_loss = val_metrics["loss"]
+            is_best = current_val_loss < best_val_loss
+            if is_best:
+                best_val_loss = current_val_loss
+                logger.info(f"===== 最优模型更新 (Epoch {epoch}) | Best Loss: {best_val_loss:.4f} =====")
+        
+        # 保存检查点
+        if epoch % cfg.SAVE_FREQ == 0 or epoch == cfg.NUM_EPOCHS or is_best:
+            metrics = {
+                "train": train_metrics,
+                "val": val_metrics if epoch % cfg.VAL_FREQ == 0 else None,
+                "val_obst": val_obst_metrics if epoch % cfg.VAL_FREQ == 0 else None,
+                "best_loss": best_val_loss
+            }
+            ckpt_path = save_checkpoint(
+                epoch=epoch,
+                model=model,
+                optimizer=optimizer,
+                config=cfg,
+                metrics=metrics,
+                is_best=is_best if epoch % cfg.VAL_FREQ == 0 else False,
+                save_dir=cfg.EXP_LOG_DIR
+            )
+            logger.info(f"===== 保存检查点: {ckpt_path} =====")
+    
+    logger.info("===== 训练完成 =====")
+
+if __name__ == "__main__":
+    main()
