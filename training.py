@@ -5,7 +5,15 @@ from tqdm import tqdm
 
 # 导入自定义模块
 from config import cfg
-from utils import setup_logger, plot_training_curves, save_checkpoint, load_checkpoint, compute_metrics, aggregate_metrics
+from utils import (
+    setup_logger,
+    plot_training_curves,
+    save_checkpoint,
+    compute_metrics,
+    aggregate_metrics,
+    save_config_snapshot,
+    append_metrics_record,
+)
 from data_process.data_loader import get_data_loaders
 from act.policy import ACTPolicy, CNNMLPPolicy
 
@@ -15,11 +23,36 @@ np.random.seed(cfg.SEED)
 if cfg.USE_CUDA:
     torch.cuda.manual_seed(cfg.SEED)
 
-# 初始化日志
-logger = setup_logger(cfg.EXP_LOG_DIR, cfg.EXP_NAME)
+def get_device(config):
+    """Return the target device for the current run."""
+    return torch.device("cuda" if config.USE_CUDA else "cpu")
+
+
+def move_tensor_batch_to_device(batch_tensors, device):
+    """Move a flat tuple/list of tensors onto the same device."""
+    return [tensor.to(device, non_blocking=True) for tensor in batch_tensors]
+
+
+def prepare_run_config(config):
+    """
+    Finalize run metadata before training starts.
+    For resume, restore the original run config from checkpoint.
+    For fresh training, create a new experiment name/path.
+    """
+    if config.TRAIN_MODE == "resume":
+        if not os.path.exists(config.RESUME_CKPT_PATH):
+            raise FileNotFoundError(f"断点续训文件不存在: {config.RESUME_CKPT_PATH}")
+        ckpt = torch.load(config.RESUME_CKPT_PATH, map_location="cpu")
+        config.update_from_ckpt(ckpt["config"])
+        return ckpt
+
+    config.start_new_experiment()
+    return None
+
 
 def init_model_and_optimizer(config):
     """初始化模型和优化器"""
+    device = get_device(config)
     args_override = {
         "lr": config.LR,
         "lr_backbone": config.LR_BACKBONE,
@@ -30,40 +63,34 @@ def init_model_and_optimizer(config):
     }
     
     if config.POLICY_CLASS == "ACTPolicy":
-        policy = ACTPolicy(args_override)
+        policy = ACTPolicy(args_override, device=device)
     elif config.POLICY_CLASS == "CNNMLPPolicy":
-        policy = CNNMLPPolicy(args_override)
+        policy = CNNMLPPolicy(args_override, device=device)
     else:
         raise ValueError(f"不支持的策略类型: {config.POLICY_CLASS}")
-    
-    if config.USE_CUDA:
-        policy = policy.cuda()
     
     optimizer = policy.configure_optimizers()
     return policy, optimizer
 
 def train_one_epoch(model, train_loader, optimizer, epoch, config, logger):
     """训练一个epoch"""
+    device = get_device(config)
     model.train()
     train_metrics_list = []
     total_batches = len(train_loader)
     
     pbar = tqdm(enumerate(train_loader), total=total_batches, desc=f"Train Epoch {epoch}")
     for batch_idx, (imgs, currs, futures, m_imgs, obsts) in pbar:
-        # 数据移到GPU
-        if config.USE_CUDA:
-            imgs = imgs.cuda()
-            currs = currs.cuda()
-            futures = futures.cuda()
-            m_imgs = m_imgs.cuda()
+        imgs, currs, futures, m_imgs = move_tensor_batch_to_device(
+            (imgs, currs, futures, m_imgs),
+            device,
+        )
         
         # 前向传播
         optimizer.zero_grad()
         if config.POLICY_CLASS == "ACTPolicy":
             # ACTPolicy需要memory_image和is_pad（这里is_pad设为全False）
-            is_pad = torch.zeros((futures.shape[0], futures.shape[1]), dtype=torch.bool)
-            if config.USE_CUDA:
-                is_pad = is_pad.cuda()
+            is_pad = torch.zeros((futures.shape[0], futures.shape[1]), dtype=torch.bool, device=futures.device)
             loss_dict = model(
                 qpos=currs,
                 image=imgs,
@@ -99,10 +126,12 @@ def train_one_epoch(model, train_loader, optimizer, epoch, config, logger):
     train_metrics = aggregate_metrics(train_metrics_list)
     logger.info(f"===== Train Epoch {epoch} Summary =====")
     logger.info(" | ".join([f"{k}: {v:.4f}" for k, v in train_metrics.items()]))
+    append_metrics_record(config.EXP_LOG_DIR, "train", epoch, train_metrics)
     return train_metrics
 
-def validate(model, val_loader, config, logger, is_obst=False):
+def validate(model, val_loader, config, logger, epoch, is_obst=False):
     """验证（区分普通/障碍轨迹）"""
+    device = get_device(config)
     model.eval()
     val_metrics_list = []
     total_batches = len(val_loader)
@@ -131,18 +160,14 @@ def validate(model, val_loader, config, logger, is_obst=False):
             if len(imgs) == 0:
                 continue
             
-            # 数据移到GPU
-            if config.USE_CUDA:
-                imgs = imgs.cuda()
-                currs = currs.cuda()
-                futures = futures.cuda()
-                m_imgs = m_imgs.cuda()
+            imgs, currs, futures, m_imgs = move_tensor_batch_to_device(
+                (imgs, currs, futures, m_imgs),
+                device,
+            )
             
             # 前向传播
             if config.POLICY_CLASS == "ACTPolicy":
-                is_pad = torch.zeros((futures.shape[0], futures.shape[1]), dtype=torch.bool)
-                if config.USE_CUDA:
-                    is_pad = is_pad.cuda()
+                is_pad = torch.zeros((futures.shape[0], futures.shape[1]), dtype=torch.bool, device=futures.device)
                 loss_dict = model(
                     qpos=currs,
                     image=imgs,
@@ -169,13 +194,16 @@ def validate(model, val_loader, config, logger, is_obst=False):
         val_metrics = aggregate_metrics(val_metrics_list)
     
     # 打印日志
+    stage = "val_obst" if is_obst else "val"
     logger.info(f"===== Val (Obst={is_obst}) Summary =====")
     logger.info(" | ".join([f"{k}: {v:.4f}" for k, v in val_metrics.items()]))
+    append_metrics_record(config.EXP_LOG_DIR, stage, epoch, val_metrics)
     return val_metrics
 
 def main():
+    resume_ckpt = prepare_run_config(cfg)
+
     # 1. 初始化数据加载器
-    logger.info("===== 加载数据集 =====")
     train_loader, val_loader = get_data_loaders(
         data_root=cfg.DATA_ROOT,
         future_steps=cfg.FUTURE_STEPS,
@@ -184,21 +212,26 @@ def main():
     )
     
     # 2. 初始化模型和优化器
-    logger.info("===== 初始化模型 =====")
     model, optimizer = init_model_and_optimizer(cfg)
     start_epoch = 1
     best_val_loss = float("inf")
     
     # 3. 断点续训处理
-    if cfg.TRAIN_MODE == "resume":
-        if not os.path.exists(cfg.RESUME_CKPT_PATH):
-            raise FileNotFoundError(f"断点续训文件不存在: {cfg.RESUME_CKPT_PATH}")
+    if resume_ckpt is not None:
+        model.load_state_dict(resume_ckpt["model_state_dict"])
+        optimizer.load_state_dict(resume_ckpt["optimizer_state_dict"])
+        start_epoch = resume_ckpt["epoch"] + 1
+        best_val_loss = resume_ckpt["best_loss"]
+
+    os.makedirs(cfg.EXP_LOG_DIR, exist_ok=True)
+    logger = setup_logger(cfg.EXP_LOG_DIR, cfg.EXP_NAME)
+    save_config_snapshot(cfg, cfg.EXP_LOG_DIR)
+
+    logger.info(f"===== 实验目录: {cfg.EXP_LOG_DIR} =====")
+    logger.info("===== 加载数据集完成 =====")
+    logger.info("===== 初始化模型完成 =====")
+    if resume_ckpt is not None:
         logger.info(f"===== 加载断点: {cfg.RESUME_CKPT_PATH} =====")
-        ckpt = load_checkpoint(cfg.RESUME_CKPT_PATH, model, optimizer)
-        start_epoch = ckpt["epoch"] + 1
-        best_val_loss = ckpt["best_loss"]
-        # 更新配置
-        cfg.update_from_ckpt(ckpt["config"])
         logger.info(f"断点续训，从Epoch {start_epoch} 开始")
     
     # 4. 训练过程记录
@@ -209,6 +242,10 @@ def main():
     # 5. 开始训练
     logger.info("===== 开始训练 =====")
     for epoch in range(start_epoch, cfg.NUM_EPOCHS + 1):
+        is_best = False
+        val_metrics = None
+        val_obst_metrics = None
+
         # 训练
         train_metrics = train_one_epoch(model, train_loader, optimizer, epoch, cfg, logger)
         
@@ -219,9 +256,9 @@ def main():
         # 验证
         if epoch % cfg.VAL_FREQ == 0 or epoch == cfg.NUM_EPOCHS:
             # 普通轨迹验证
-            val_metrics = validate(model, val_loader, cfg, logger, is_obst=False)
+            val_metrics = validate(model, val_loader, cfg, logger, epoch, is_obst=False)
             # 障碍轨迹验证
-            val_obst_metrics = validate(model, val_loader, cfg, logger, is_obst=True)
+            val_obst_metrics = validate(model, val_loader, cfg, logger, epoch, is_obst=True)
             
             # 记录验证指标
             for k in val_metrics_history.keys():
@@ -248,8 +285,8 @@ def main():
         if epoch % cfg.SAVE_FREQ == 0 or epoch == cfg.NUM_EPOCHS or is_best:
             metrics = {
                 "train": train_metrics,
-                "val": val_metrics if epoch % cfg.VAL_FREQ == 0 else None,
-                "val_obst": val_obst_metrics if epoch % cfg.VAL_FREQ == 0 else None,
+                "val": val_metrics,
+                "val_obst": val_obst_metrics,
                 "best_loss": best_val_loss
             }
             ckpt_path = save_checkpoint(
@@ -258,7 +295,7 @@ def main():
                 optimizer=optimizer,
                 config=cfg,
                 metrics=metrics,
-                is_best=is_best if epoch % cfg.VAL_FREQ == 0 else False,
+                is_best=is_best,
                 save_dir=cfg.EXP_LOG_DIR
             )
             logger.info(f"===== 保存检查点: {ckpt_path} =====")

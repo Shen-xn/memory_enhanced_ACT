@@ -7,19 +7,49 @@ import IPython
 e = IPython.embed
 
 class ACTPolicy(nn.Module):
-    def __init__(self, args_override):
+    def __init__(self, args_override, device=None):
         super().__init__()
-        model, optimizer = build_me_ACT_model_and_optimizer(args_override)
+        model, optimizer = build_me_ACT_model_and_optimizer(args_override, device=device)
         self.model = model # CVAE decoder
         self.optimizer = optimizer
         self.kl_weight = args_override['kl_weight']
         print(f'KL Weight {self.kl_weight}')
+
+    def _prepare_image_input(self, image):
+        """
+        Accept either:
+        - [B, C, H, W] for a single camera
+        - [B, N, C, H, W] for multi-camera input
+        and normalize to the 5D format expected by the DETR backbone path.
+        """
+        expected_cameras = len(getattr(self.model, "camera_names", []))
+
+        if image.dim() == 4:
+            if expected_cameras not in (0, 1):
+                raise ValueError(
+                    f"Expected {expected_cameras} camera views, but got a single-image tensor "
+                    f"with shape {tuple(image.shape)}."
+                )
+            return image.unsqueeze(1)
+
+        if image.dim() != 5:
+            raise ValueError(
+                f"Expected image shape [B, C, H, W] or [B, N, C, H, W], got {tuple(image.shape)}."
+            )
+
+        if expected_cameras and image.size(1) != expected_cameras:
+            raise ValueError(
+                f"Expected {expected_cameras} camera views, but got tensor shape {tuple(image.shape)}."
+            )
+
+        return image
 
     def __call__(self, qpos, image, memory_image=None, actions=None, is_pad=None):
         env_state = None
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406, 0.5],
                                          std=[0.229, 0.224, 0.225, 0.4])
         image = normalize(image)
+        image = self._prepare_image_input(image)
         
         if memory_image is not None:
             memory_image = normalize(memory_image)
@@ -46,17 +76,41 @@ class ACTPolicy(nn.Module):
 
 
 class CNNMLPPolicy(nn.Module):
-    def __init__(self, args_override):
+    def __init__(self, args_override, device=None):
         super().__init__()
-        model, optimizer = build_CNNMLP_model_and_optimizer(args_override)
+        model, optimizer = build_CNNMLP_model_and_optimizer(args_override, device=device)
         self.model = model # decoder
         self.optimizer = optimizer
+
+    def _prepare_image_input(self, image):
+        expected_cameras = len(getattr(self.model, "camera_names", []))
+
+        if image.dim() == 4:
+            if expected_cameras not in (0, 1):
+                raise ValueError(
+                    f"Expected {expected_cameras} camera views, but got a single-image tensor "
+                    f"with shape {tuple(image.shape)}."
+                )
+            return image.unsqueeze(1)
+
+        if image.dim() != 5:
+            raise ValueError(
+                f"Expected image shape [B, C, H, W] or [B, N, C, H, W], got {tuple(image.shape)}."
+            )
+
+        if expected_cameras and image.size(1) != expected_cameras:
+            raise ValueError(
+                f"Expected {expected_cameras} camera views, but got tensor shape {tuple(image.shape)}."
+            )
+
+        return image
 
     def __call__(self, qpos, image, actions=None, is_pad=None):
         env_state = None # TODO
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                          std=[0.229, 0.224, 0.225])
         image = normalize(image)
+        image = self._prepare_image_input(image)
         if actions is not None: # training time
             actions = actions[:, 0]
             a_hat = self.model(qpos, image, env_state, actions)

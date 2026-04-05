@@ -54,8 +54,8 @@ class DETRVAE(nn.Module):
         self.action_head = nn.Linear(hidden_dim, state_dim)
         self.is_pad_head = nn.Linear(hidden_dim, 1)
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
-        if me_block is not None:
-            self.me_block = me_block
+        self.me_block = me_block
+        
         if backbones is not None:
             self.input_proj = nn.Conv2d(backbones[0].num_channels, hidden_dim, kernel_size=1)
             self.backbones = nn.ModuleList(backbones)
@@ -144,12 +144,27 @@ class DETRVAE(nn.Module):
             # fold camera dimension into width dimension
             src = torch.cat(all_cam_features, axis=3)
             pos = torch.cat(all_cam_pos, axis=3)
-            hs = self.transformer(src, None, self.query_embed.weight, pos, latent_input, proprio_input, self.additional_pos_embed.weight)[0]
+            hs = self.transformer(
+                src,
+                None,
+                None,
+                self.query_embed.weight,
+                pos,
+                latent_input,
+                proprio_input,
+                self.additional_pos_embed.weight,
+            )[0]
         else:
             qpos = self.input_proj_robot_state(qpos)
             env_state = self.input_proj_env_state(env_state)
             transformer_input = torch.cat([qpos, env_state], axis=1) # seq length = 2
-            hs = self.transformer(transformer_input, None, self.query_embed.weight, self.pos.weight)[0]
+            hs = self.transformer(
+                transformer_input,
+                None,
+                None,
+                self.query_embed.weight,
+                self.pos.weight,
+            )[0]
         a_hat = self.action_head(hs)
         is_pad_hat = self.is_pad_head(hs)
         return a_hat, is_pad_hat, [mu, logvar], new_memory_image
@@ -261,10 +276,10 @@ def build(args):
     encoder = build_encoder(args)
 
     model = DETRVAE(
-        me_block,
-        backbones,
-        transformer,
-        encoder,
+        backbones=backbones,
+        transformer=transformer,
+        encoder=encoder,
+        me_block=me_block,
         state_dim=args.state_dim,
         num_queries=args.num_queries,
         camera_names=args.camera_names,

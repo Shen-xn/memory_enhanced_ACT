@@ -58,7 +58,7 @@ class ImitationDataset(Dataset):
         task_dirs = sorted(glob.glob(os.path.join(self.data_root, "task*")))
         task_dirs = [d for d in task_dirs if os.path.isdir(d) and "task_copy" not in d]
 
-        print(f"📂 找到 {len(task_dirs)} 个任务文件夹")
+        print(f"找到 {len(task_dirs)} 个任务文件夹")
 
         for task_dir in task_dirs:
             task_name = os.path.basename(task_dir)
@@ -70,22 +70,22 @@ class ImitationDataset(Dataset):
             has_memory_folder = os.path.exists(mem_img_dir)
 
             if not os.path.exists(img_dir) or not os.path.exists(csv_path):
-                print(f"❌ {task_name} 缺失文件，跳过")
+                print(f"{task_name} 缺失文件，跳过")
                 continue
 
             try:
                 df = pd.read_csv(csv_path)
             except:
-                print(f"❌ {task_name} CSV读取失败，跳过")
+                print(f"{task_name} CSV读取失败，跳过")
                 continue
 
             img_paths = sorted(glob.glob(os.path.join(img_dir, "*.png")))
             if len(img_paths) == 0:
-                print(f"❌ {task_name} 无四通道图像，跳过")
+                print(f"{task_name} 无四通道图像，跳过")
                 continue
 
             if self.strict_alignment and len(img_paths) != len(df):
-                print(f"❌ {task_name} 图像与轨迹帧数不匹配，跳过")
+                print(f"{task_name} 图像与轨迹帧数不匹配，跳过")
                 continue
 
             n_frames = min(len(img_paths), len(df))
@@ -99,12 +99,12 @@ class ImitationDataset(Dataset):
 
             joint_cols = ["j1", "j2", "j3", "j4", "j5", "j10"]
             if not all(c in df.columns for c in joint_cols):
-                print(f"❌ {task_name} 缺少关节列，跳过")
+                print(f"{task_name} 缺少关节列，跳过")
                 continue
 
             max_idx = n_frames - self.future_steps
             if max_idx <= 0:
-                print(f"❌ {task_name} 帧数不足，跳过")
+                print(f"{task_name} 帧数不足，跳过")
                 continue
 
             is_obstacle = "obst" in task_name.lower()
@@ -127,7 +127,7 @@ class ImitationDataset(Dataset):
                 }
                 samples.append(sample)
 
-        print(f"✅ 总有效样本数：{len(samples)}")
+        print(f"总有效样本数：{len(samples)}")
         return samples
 
     def _split_by_task(self, train_ratio, seed):
@@ -141,7 +141,7 @@ class ImitationDataset(Dataset):
         else:
             self.samples = [s for s in self.all_samples if s["task"] not in train_tasks]
 
-        print(f"✅ {self.mode.upper()} 集样本数：{len(self.samples)}")
+        print(f"{self.mode.upper()} 集样本数：{len(self.samples)}")
 
     def _compute_joint_stats(self):
         all_joints = []
@@ -204,7 +204,7 @@ def get_data_loaders(
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
-    print("\n🎉 数据加载器创建完成！")
+    print("\n数据加载器创建完成！")
     return train_loader, val_loader
 
 
@@ -221,21 +221,21 @@ if __name__ == "__main__":
 
     print("\n======= 训练集测试 =======")
     for imgs, currs, futures, m_imgs, obsts in train_loader:
-        print("🖼️  主图像:", imgs.shape)
-        print("🦾 当前关节:", currs.shape)
-        print("🔮 未来动作:", futures.shape)
-        print("🧠 Memory图像:", m_imgs.shape)
-        print("🚧 障碍标签:", obsts)
+        print("主图像:", imgs.shape)
+        print("当前关节:", currs.shape)
+        print("未来动作:", futures.shape)
+        print("Memory图像:", m_imgs.shape)
+        print("障碍标签:", obsts)
         print("Memory 是否全零:", (torch.sum(m_imgs, (1, 2, 3)) == 0).unsqueeze(0).unsqueeze(2))
         break
         
 
     print("\n======= 验证集测试 =======")
     for imgs, currs, futures, m_imgs, obsts in val_loader:
-        print("🖼️  主图像:", imgs.shape)
-        print("🦾 当前关节:", currs.shape)
-        print("🔮 未来动作:", futures.shape)
-        print("🧠 Memory图像:", m_imgs.shape)
-        print("🚧 障碍标签:", obsts.shape)
+        print("主图像:", imgs.shape)
+        print("当前关节:", currs.shape)
+        print("未来动作:", futures.shape)
+        print("Memory图像:", m_imgs.shape)
+        print("障碍标签:", obsts.shape)
         print("Memory 是否全零:", torch.all(m_imgs == 0))
         break

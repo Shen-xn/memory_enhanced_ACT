@@ -1,4 +1,5 @@
 import os
+import json
 import torch
 import numpy as np
 import logging
@@ -10,6 +11,11 @@ def setup_logger(log_dir, exp_name):
     """设置日志记录器"""
     logger = logging.getLogger(exp_name)
     logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    for handler in logger.handlers[:]:
+        handler.close()
+        logger.removeHandler(handler)
     
     # 控制台输出
     ch = logging.StreamHandler()
@@ -27,6 +33,41 @@ def setup_logger(log_dir, exp_name):
     logger.addHandler(ch)
     logger.addHandler(fh)
     return logger
+
+
+def _to_serializable(obj):
+    if isinstance(obj, dict):
+        return {k: _to_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_serializable(v) for v in obj]
+    if isinstance(obj, np.generic):
+        return obj.item()
+    return obj
+
+
+def save_config_snapshot(config, save_dir, filename="config.json"):
+    """Write a readable config snapshot for the current run."""
+    os.makedirs(save_dir, exist_ok=True)
+    config_path = os.path.join(save_dir, filename)
+    config_dict = {k: v for k, v in config.__dict__.items() if not k.startswith("__")}
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(_to_serializable(config_dict), f, indent=2, ensure_ascii=False)
+    return config_path
+
+
+def append_metrics_record(save_dir, stage, epoch, metrics):
+    """Append one structured metrics record to metrics.jsonl."""
+    os.makedirs(save_dir, exist_ok=True)
+    record = {
+        "epoch": epoch,
+        "stage": stage,
+        "metrics": _to_serializable(metrics),
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }
+    metrics_path = os.path.join(save_dir, "metrics.jsonl")
+    with open(metrics_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return metrics_path
 
 # ===================== 可视化工具 =====================
 def plot_training_curves(train_metrics, val_metrics, val_obst_metrics, save_path):
