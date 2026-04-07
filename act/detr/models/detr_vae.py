@@ -116,10 +116,9 @@ class DETRVAE(nn.Module):
             latent_sample = torch.zeros([bs, self.latent_dim], dtype=torch.float32).to(qpos.device)
             latent_input = self.latent_out_proj(latent_sample)
 
+        new_memory_image = None
         if self.me_block is not None and memory_image is not None:
             new_memory_image = self.me_block(memory_image, image)
-        else:
-            new_memory_image = None
         
         if self.backbones is not None:
             # Image observation features and position embeddings
@@ -132,11 +131,12 @@ class DETRVAE(nn.Module):
                 all_cam_features.append(self.input_proj(features))
                 all_cam_pos.append(pos)
                 
-            if self.me_block is not None and memory_image is not None:
-                features, pos = self.backbones[0](memory_image)
+            memory_source = new_memory_image if new_memory_image is not None else memory_image
+            if memory_source is not None:
+                features, pos = self.backbones[0](memory_source)
                 features = features[0] # take the last layer feature
                 pos = pos[0]
-                all_cam_features.append(features)
+                all_cam_features.append(self.input_proj(features))
                 all_cam_pos.append(pos)
                 
             # proprioception features

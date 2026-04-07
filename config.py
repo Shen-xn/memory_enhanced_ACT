@@ -14,8 +14,8 @@ class Config:
         self.DATA_ROOT = os.path.join(self.ROOT_DIR, "data_process", "data")
 
         # ===================== 训练配置 =====================
-        self.TRAIN_MODE = "train"
-        self.RESUME_CKPT_PATH = ""
+        self.TRAIN_MODE = "resume"
+        self.RESUME_CKPT_PATH = "C:/Users/DELL/Desktop/me_ACT/memory_enhanced_ACT/log/exp_20260406_042245/ckpt_epoch_6.pth"
 
         self.NUM_EPOCHS = 20
         self.BATCH_SIZE = 8

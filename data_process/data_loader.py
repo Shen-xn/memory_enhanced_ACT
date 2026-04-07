@@ -33,17 +33,10 @@ class ImitationDataset(Dataset):
         self.strict_alignment = strict_alignment
         self.joint_min_max = joint_min_max
 
-        random.seed(seed)
-        np.random.seed(seed)
-
         self.transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406, 0.5],
-                std=[0.229, 0.224, 0.225, 0.5]
-            )
         ])
-
+        
         self.all_samples = self._load_all_samples()
         self._split_by_task(train_ratio, seed)
 

@@ -3,6 +3,7 @@ import json
 import torch
 import numpy as np
 import logging
+import random
 import matplotlib.pyplot as plt
 from datetime import datetime
 
@@ -68,6 +69,34 @@ def append_metrics_record(save_dir, stage, epoch, metrics):
     with open(metrics_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
     return metrics_path
+
+
+def capture_rng_state():
+    """Capture global RNG states for reproducible resume."""
+    state = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["torch_cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def restore_rng_state(state):
+    """Restore global RNG states if they are present in a checkpoint."""
+    if not state:
+        return False
+
+    if "python" in state:
+        random.setstate(state["python"])
+    if "numpy" in state:
+        np.random.set_state(state["numpy"])
+    if "torch" in state:
+        torch.set_rng_state(state["torch"])
+    if torch.cuda.is_available() and "torch_cuda" in state:
+        torch.cuda.set_rng_state_all(state["torch_cuda"])
+    return True
 
 # ===================== 可视化工具 =====================
 def plot_training_curves(train_metrics, val_metrics, val_obst_metrics, save_path):
@@ -146,7 +175,8 @@ def save_checkpoint(epoch, model, optimizer, config, metrics, is_best, save_dir)
         "optimizer_state_dict": optimizer.state_dict(),
         "config": {k: v for k, v in config.__dict__.items() if not k.startswith("__")},
         "metrics": metrics,
-        "best_loss": metrics["best_loss"] if "best_loss" in metrics else metrics["loss"]
+        "best_loss": metrics["best_loss"] if "best_loss" in metrics else metrics["loss"],
+        "rng_state": capture_rng_state(),
     }
     
     # 保存普通ckpt
@@ -170,7 +200,11 @@ def load_checkpoint(ckpt_path, model, optimizer):
     Returns:
         ckpt: 检查点字典
     """
-    ckpt = torch.load(ckpt_path, map_location="cuda" if torch.cuda.is_available() else "cpu")
+    ckpt = torch.load(
+        ckpt_path,
+        map_location="cuda" if torch.cuda.is_available() else "cpu",
+        weights_only=False,
+    )
     model.load_state_dict(ckpt["model_state_dict"])
     if optimizer is not None:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])

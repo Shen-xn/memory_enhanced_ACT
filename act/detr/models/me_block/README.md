@@ -1,215 +1,269 @@
-# 记忆增强模块 (Memory Enhancement Block)
+# ME Block
 
-为ACT模型添加记忆能力的模块，用于处理遮挡场景下的机器人操作任务。
+`me_block` 当前的真实定位不是“已经并入 ACT 主训练的在线 recurrent memory”，而是“一套离线记忆图训练与生成子系统”。
 
-## 文件结构
+它负责的事情是：
 
-```
-me_block/
-├── memory_gate_model.py    # 核心记忆门控模型
-├── config.py               # 配置类
-├── integration_example.py  # ACT集成示例
-├── plan.py                 # 对比学习预训练计划
-└── README.md               # 本文件
-```
+1. 从四通道图像中识别重要区域。
+2. 用显式递推规则更新历史记忆。
+3. 输出可解释的 `memory_image_four_channel`。
+4. 把结果留给主训练 dataloader 读取。
 
-## 核心模型
+如果你想看怎么运行，请先看根目录 [`README.md`](../../../../README.md)。这里主要说明模块结构、数据约定和内部实现。
 
-### MemoryGateBlock
-基于GRU和注意力机制的门控记忆融合模块：
+## 1. 当前模块边界
 
-**主要组件**：
-1. **更新门控** (Update Gate)：控制记忆更新程度
-2. **重置门控** (Reset Gate)：控制记忆重置程度
-3. **跨模态注意力**：当前观测与历史记忆的交互
-4. **记忆缓冲区**：存储历史信息的可学习表示
+当前仓库里，`me_block` 有两层含义，需要分清：
 
-**输入输出**：
-- 输入：当前特征 `[batch, input_dim]`
-- 输出：融合特征 `[batch, input_dim]` + 更新记忆 + 注意力权重
+1. 离线版真实模型：`importance segmentation + memory update`
+2. ACT 主训练中的兼容接口：`build_me_block()` 返回的 identity stub
 
-### TemporalMemoryNetwork
-多层时序记忆网络，处理序列数据：
-- 多层MemoryGateBlock堆叠
-- 支持序列输入输出
-- 保持时间一致性
+也就是说，真正负责生成记忆图的是本目录下的离线模型；而 `cfg.ME_BLOCK = True` 走到 DETR 主线时，并不会在线执行这套分割和递推逻辑。
 
-## 配置
+## 2. 目录内文件职责
 
-使用 `MemoryGateConfig` 类进行配置：
+- [`me_block_config.py`](./me_block_config.py)
+  统一定义 `me_block` 的配置数据结构。
+- [`importance_dataset.py`](./importance_dataset.py)
+  importance segmentation 训练数据集，负责扫描任务目录、按同名文件配对图像与标签、按任务划分 train / val。
+- [`memory_gate_model.py`](./memory_gate_model.py)
+  核心模型实现，包括分割模型、记忆更新器和兼容 stub。
+- [`annotate_importance_labels.py`](./annotate_importance_labels.py)
+  OpenCV 交互式标注工具。
+- [`train_importance_model.py`](./train_importance_model.py)
+  importance segmentation 训练入口。
+- [`generate_memory_images.py`](./generate_memory_images.py)
+  用训练好的模型逐任务逐帧生成记忆图。
 
-```python
-from config import MemoryGateConfig, ACT_INTEGRATION_CONFIG
+## 3. 配置结构
 
-# 使用默认配置
-config = MemoryGateConfig()
+[`me_block_config.py`](./me_block_config.py) 里主要有 4 组配置：
 
-# 使用ACT集成配置
-config = ACT_INTEGRATION_CONFIG
+- `ImportanceModelConfig`
+  分割模型相关配置，比如 `model_name`、`input_channels`、`class_names`、`class_weights`。
+- `MemoryUpdateConfig`
+  显式记忆递推参数，比如 `score_decay`、`tau_up`、`tau_out`、`output_dilation_radius`。
+- `ImportanceTrainingConfig`
+  训练数据与优化参数，比如 `data_root`、`batch_size`、`num_epochs`、`learning_rate`。
+- `MemoryGenerationConfig`
+  记忆图离线导出参数，比如输出目录名和 `task_filter`。
 
-# 自定义配置
-config = MemoryGateConfig(
-    input_dim=512,
-    hidden_dim=256,
-    memory_size=10,
-    num_heads=8,
-    dropout=0.1
-)
-```
+当前默认类别是：
 
-## 集成到ACT
+- `target`
+- `goal`
+- `arm`
 
-### 基本集成方式
+默认类别权重是：
 
-```python
-from memory_gate_model import TemporalMemoryNetwork
-from integration_example import ACTWithMemory
+- `target`: `0.6`
+- `goal`: `0.3`
+- `arm`: `0.1`
 
-# 1. 创建视觉编码器
-visual_encoder = YourVisualEncoder()
+这些权重会在内部归一化后用于计算 importance score。
 
-# 2. 创建带记忆的ACT模型
-model = ACTWithMemory(
-    visual_encoder=visual_encoder,
-    transformer_dim=512,
-    action_dim=14,
-    chunk_size=100
-)
+## 4. 数据约定
 
-# 3. 使用模型
-actions_pred, memory_state = model(images, qpos)
+### 4.1 输入图像
+
+输入来自每个任务目录下的：
+
+```text
+task_xxx/
+  four_channel/
 ```
 
-### 集成位置
-记忆模块插入在：
-```
-图像输入 → 视觉编码器 → [记忆增强模块] → Transformer → 动作输出
-```
+要求是 4 通道 PNG：
 
-## 训练建议
+- 前 3 通道：RGB
+- 第 4 通道：depth
 
-### 1. 预训练记忆模块
-使用对比学习预训练记忆模块（参考 `plan.py`）：
-- 正样本：时间连续的帧
-- 负样本：随机其他帧
-- 目标：学习时间一致性表示
+`importance_dataset.py` 和 `generate_memory_images.py` 都会扫描所有 `task*` 目录，并跳过名称中包含 `task_copy` 的目录。
 
-### 2. 端到端训练
-将记忆模块与ACT一起训练：
-- 使用遮挡数据集
-- 联合优化记忆和动作预测
-- 监控记忆注意力可视化
+### 4.2 标签图
 
-### 3. 消融实验
-比较：
-1. 无记忆的基线ACT
-2. 有记忆的ACT
-3. 不同记忆配置（大小、层数等）
+监督标签放在：
 
-## 使用示例
-
-### 基本使用
-```python
-import torch
-from memory_gate_model import MemoryGateBlock
-
-# 创建模型
-model = MemoryGateBlock(
-    input_dim=512,
-    hidden_dim=256,
-    memory_size=10,
-    num_heads=8
-)
-
-# 处理序列
-batch_size = 4
-seq_len = 5
-features = torch.randn(batch_size, seq_len, 512)
-
-memories = None
-for t in range(seq_len):
-    current_feat = features[:, t, :]
-    fused_feat, memories, attn_weights = model(current_feat, memories)
-    # 使用 fused_feat 进行后续处理
+```text
+task_xxx/
+  importance_labels/
 ```
 
-### 集成到训练循环
-```python
-def train_step(model, batch):
-    images = batch['images']
-    qpos = batch['qpos']
-    actions_gt = batch['actions']
-    
-    # 如果是episode开始，重置记忆
-    if batch.get('is_first', False):
-        model.reset_memory(images.size(0))
-    
-    # 前向传播
-    actions_pred, memory_state = model(images, qpos, actions_gt)
-    
-    # 计算损失
-    loss = compute_loss(actions_pred, actions_gt)
-    
-    return loss, memory_state
+标签是单通道 PNG。当前推荐的稀疏标注约定为：
+
+- `0`：explicit background
+- `1`：target
+- `2`：goal
+- `3`：arm
+- `255`：未标注 / 忽略
+
+也就是说，新流程下你不需要把整张图的 background 手工刷满；只标前景三类即可。对于容易误检的区域，可以补少量 `0=background` 作为负样本；其余区域直接留成 `255` 未标注即可，训练时会被忽略。
+
+如果后面要扩类，至少要同步修改：
+
+- `ImportanceModelConfig.class_names`
+- `ImportanceModelConfig.class_weights`
+- 标注工具和标签图中的类别编号
+
+### 4.3 稀疏标注支持
+
+训练数据不是要求“整条 task 全部标完”才能训练，而是通过文件名交集配对：
+
+- `four_channel/000123.png`
+- `importance_labels/000123.png`
+
+只要这两个同名文件同时存在，这一帧就会进入训练样本。
+
+当前训练是“稀疏前景监督”：
+
+- 未标注区域 `255` 不参与 loss
+- 如果有显式 `0=background` 标注，也会作为有效负样本参与训练
+- loss 不再被大面积背景像素直接主导
+
+### 4.4 生成输出
+
+离线生成阶段会在任务目录下写出：
+
+- `memory_image_four_channel/`
+- `memory_scores/`
+- `memory_binary_masks/`
+- `memory_image_meta.json`
+
+其中：
+
+- `memory_image_four_channel` 是最终给 ACT 使用的 4 通道记忆图。
+- `memory_scores` 是单通道重要性分数图。
+- `memory_binary_masks` 是输出门控后的二值 mask。
+- `memory_image_meta.json` 记录了 checkpoint、类别和递推超参数。
+
+## 5. 模型结构
+
+当前核心不是端到端长时序网络，而是两部分拼起来：
+
+1. 一个轻量 importance segmentation 网络
+2. 一个显式记忆更新器
+
+### 5.1 ImportanceSegmentationModel
+
+位置：
+
+- [`memory_gate_model.py`](./memory_gate_model.py)
+
+作用：
+
+- 输入 `[B, 4, H, W]` 的四通道图像
+- 做通道归一化
+- 输出背景 + 前景类别的 segmentation logits
+
+当前默认骨干是：
+
+- `lraspp_mobilenet_v3_large`
+
+代码里还做了第一层卷积改造，让网络能直接接收 4 通道输入。
+
+### 5.2 MemoryImageUpdater
+
+这一部分不做反向传播上的时序建模，而是用显式规则逐帧更新记忆。
+
+核心量可以这样理解：
+
+- `class_probs`
+  前景类别概率图。
+- `importance_score`
+  按类别权重加权得到的单通道重要性分数图。
+- `score_state`
+  当前记忆分数状态。
+- `memory_state`
+  当前记忆内容状态。
+- `write_mask`
+  当前帧哪些像素值得覆盖旧记忆。
+- `output_mask`
+  当前哪些像素允许输出到最终记忆图。
+
+按代码逻辑，更新过程近似是：
+
+```text
+Q_t = weighted_sum(class_probs_t)
+S^-_t = score_decay * S_{t-1}
+W_t = Q_t > S^-_t + tau_up
+M_t = where(W_t, current_image_t, M_{t-1})
+S_t = where(W_t, Q_t, S^-_t)
+E_t = dilate(S_t > tau_out)
+memory_image_t = M_t * E_t
 ```
 
-## 参数说明
+当前默认递推参数是：
 
-### MemoryGateBlock 参数
-- `input_dim`: 输入特征维度（匹配视觉编码器输出）
-- `hidden_dim`: 记忆隐藏状态维度
-- `memory_size`: 记忆缓冲区大小（存储多少"记忆片段"）
-- `num_heads`: 注意力头数
-- `dropout`: Dropout率
+- `score_decay = 0.995`
+- `tau_up = 0.05`
+- `tau_out = 0.20`
+- `output_dilation_radius = 0`
 
-### 典型配置
-| 场景 | input_dim | hidden_dim | memory_size | num_heads |
-|------|-----------|------------|-------------|-----------|
-| 小型模型 | 256 | 128 | 5 | 4 |
-| 中型模型 | 512 | 256 | 10 | 8 |
-| 大型模型 | 1024 | 512 | 20 | 16 |
+### 5.3 ImportanceMemoryModel
 
-## 可视化建议
+这是训练和生成阶段统一使用的外层封装：
 
-### 记忆注意力可视化
-```python
-# 获取注意力权重
-_, _, attn_weights = memory_block(current_feat, prev_memory)
+- 训练时，实际只用它的 `segmenter` 做 segmentation supervision。
+- 生成时，按任务顺序把每一帧送进去，并把上一帧的 `prev_memory`、`prev_scores` 递推给下一帧。
 
-# 可视化
-plt.imshow(attn_weights.cpu().numpy(), cmap='hot')
-plt.title('Memory Attention Weights')
-plt.xlabel('Memory Slot')
-plt.ylabel('Batch Item')
-plt.colorbar()
-```
+## 6. 训练与生成阶段真实调用关系
 
-### 记忆内容可视化
-使用PCA/t-SNE将记忆向量降维，观察记忆空间的聚类情况。
+### 6.1 标注阶段
 
-## 调试技巧
+[`annotate_importance_labels.py`](./annotate_importance_labels.py) 会：
 
-1. **记忆不更新**：检查更新门的值是否接近0
-2. **过拟合**：增加dropout，使用更小的记忆大小
-3. **训练不稳定**：降低学习率，使用梯度裁剪
-4. **内存不足**：减小batch_size或记忆大小
+- 扫描可用任务
+- 打开 OpenCV 标注窗口
+- 支持画笔、橡皮、切换任务、跳帧、复制前一帧标签
+- 在任务目录写出 `importance_labels_meta.json`
 
-## 后续改进方向
+### 6.2 训练阶段
 
-1. **分层记忆**：短期记忆 + 长期记忆
-2. **稀疏注意力**：减少计算复杂度
-3. **可解释性**：添加记忆内容解释模块
-4. **多模态记忆**：结合视觉、触觉、语言信息
+[`train_importance_model.py`](./train_importance_model.py) 会：
 
-## 注意事项
+- 用 [`ImportanceFrameDataset`](./importance_dataset.py) 读取同名图像/标签对
+- 按任务划分 train / val
+- 使用交叉熵损失训练 segmentation 模型
+- 计算前景类别的 mean IoU
+- 保存 `latest_model.pth` 和 `best_model.pth`
 
-1. 记忆模块会增加模型参数量和计算量
-2. 需要足够的遮挡数据训练
-3. 记忆初始化对性能有影响
-4. 注意序列长度与记忆大小的平衡
+这里“best”是按验证集 `miou` 选择的。
 
----
+### 6.3 生成阶段
 
-*创建者：昊宇的记忆增强ACT项目*
-*创建时间：2026-03-31*
-*用途：机器人操作任务的遮挡处理*
+[`generate_memory_images.py`](./generate_memory_images.py) 会：
+
+- 从 checkpoint 里恢复 `MEBlockConfig`
+- 逐任务读取 `four_channel/*.png`
+- 按顺序递推 `prev_memory` 和 `prev_scores`
+- 生成记忆图、分数图、mask 和元数据
+
+如果某个任务已经完整生成过，并且你没有加 `--force`，脚本会直接跳过这个任务。
+
+## 7. 与 ACT 主线的关系
+
+当前推荐关系是：
+
+1. `me_block` 离线生成 `memory_image_four_channel`
+2. 主训练 dataloader 直接读取这些 PNG
+3. ACT 主训练里保持 `cfg.ME_BLOCK = False`
+
+这也是为什么根目录 README 会把 `me_block` 放在“离线预处理工作流”里，而不是主训练循环里。
+
+再强调一次：`memory_gate_model.py` 里的 `build_me_block()` 现在返回的是 `MemoryImageIdentity`，它只是一个兼容占位模块，不等价于这里的离线 importance/memory 模型。
+
+## 8. 如果你要继续改这个模块，先看哪几处
+
+建议阅读顺序：
+
+1. [`me_block_config.py`](./me_block_config.py)
+2. [`importance_dataset.py`](./importance_dataset.py)
+3. [`memory_gate_model.py`](./memory_gate_model.py)
+4. [`train_importance_model.py`](./train_importance_model.py)
+5. [`generate_memory_images.py`](./generate_memory_images.py)
+
+如果你后面要继续往“在线联合训练版”推进，最需要一起对照看的文件还有：
+
+1. [`../detr_vae.py`](../detr_vae.py)
+2. [`../../main.py`](../../main.py)
+3. [`../../../policy.py`](../../../policy.py)

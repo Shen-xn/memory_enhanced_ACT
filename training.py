@@ -13,19 +13,23 @@ from utils import (
     aggregate_metrics,
     save_config_snapshot,
     append_metrics_record,
+    restore_rng_state,
 )
 from data_process.data_loader import get_data_loaders
 from act.policy import ACTPolicy, CNNMLPPolicy
 
-# 设置随机种子
-torch.manual_seed(cfg.SEED)
-np.random.seed(cfg.SEED)
-if cfg.USE_CUDA:
-    torch.cuda.manual_seed(cfg.SEED)
-
 def get_device(config):
     """Return the target device for the current run."""
     return torch.device("cuda" if config.USE_CUDA else "cpu")
+
+
+def set_global_seed(seed, use_cuda):
+    """Initialize reproducible RNG states for a fresh process."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if use_cuda:
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
 
 
 def move_tensor_batch_to_device(batch_tensors, device):
@@ -42,7 +46,7 @@ def prepare_run_config(config):
     if config.TRAIN_MODE == "resume":
         if not os.path.exists(config.RESUME_CKPT_PATH):
             raise FileNotFoundError(f"断点续训文件不存在: {config.RESUME_CKPT_PATH}")
-        ckpt = torch.load(config.RESUME_CKPT_PATH, map_location="cpu")
+        ckpt = torch.load(config.RESUME_CKPT_PATH, map_location="cpu", weights_only=False)
         config.update_from_ckpt(ckpt["config"])
         return ckpt
 
@@ -202,6 +206,7 @@ def validate(model, val_loader, config, logger, epoch, is_obst=False):
 
 def main():
     resume_ckpt = prepare_run_config(cfg)
+    set_global_seed(cfg.SEED, cfg.USE_CUDA)
 
     # 1. 初始化数据加载器
     train_loader, val_loader = get_data_loaders(
@@ -222,6 +227,9 @@ def main():
         optimizer.load_state_dict(resume_ckpt["optimizer_state_dict"])
         start_epoch = resume_ckpt["epoch"] + 1
         best_val_loss = resume_ckpt["best_loss"]
+        rng_restored = restore_rng_state(resume_ckpt.get("rng_state"))
+    else:
+        rng_restored = False
 
     os.makedirs(cfg.EXP_LOG_DIR, exist_ok=True)
     logger = setup_logger(cfg.EXP_LOG_DIR, cfg.EXP_NAME)
@@ -233,6 +241,10 @@ def main():
     if resume_ckpt is not None:
         logger.info(f"===== 加载断点: {cfg.RESUME_CKPT_PATH} =====")
         logger.info(f"断点续训，从Epoch {start_epoch} 开始")
+        if rng_restored:
+            logger.info("已恢复 RNG 状态，后续 batch 打乱顺序会更接近未中断训练。")
+        else:
+            logger.info("该断点不含 RNG 状态，续训后 batch 顺序不会严格接续上次训练。")
     
     # 4. 训练过程记录
     train_metrics_history = {k: [] for k in ["loss"] + (["l1", "kl"] if cfg.POLICY_CLASS == "ACTPolicy" else ["mse"])}

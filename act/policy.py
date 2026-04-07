@@ -1,4 +1,5 @@
 import torch.nn as nn
+import torch
 from torch.nn import functional as F
 import torchvision.transforms as transforms
 
@@ -14,6 +15,22 @@ class ACTPolicy(nn.Module):
         self.optimizer = optimizer
         self.kl_weight = args_override['kl_weight']
         print(f'KL Weight {self.kl_weight}')
+
+    def _normalize_tensor(self, image):
+        channel_count = image.shape[-3]
+        if channel_count == 4:
+            normalize = transforms.Normalize(
+                mean=[0.485, 0.456, 0.406, 0.5],
+                std=[0.229, 0.224, 0.225, 0.5],
+            )
+        elif channel_count == 3:
+            normalize = transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            )
+        else:
+            raise ValueError(f"Unsupported channel count for normalization: {channel_count}")
+        return normalize(image)
 
     def _prepare_image_input(self, image):
         """
@@ -46,13 +63,11 @@ class ACTPolicy(nn.Module):
 
     def __call__(self, qpos, image, memory_image=None, actions=None, is_pad=None):
         env_state = None
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406, 0.5],
-                                         std=[0.229, 0.224, 0.225, 0.4])
-        image = normalize(image)
+        image = self._normalize_tensor(image)
         image = self._prepare_image_input(image)
         
         if memory_image is not None:
-            memory_image = normalize(memory_image)
+            memory_image = self._normalize_tensor(memory_image)
         
         if actions is not None: # training time
             actions = actions[:, :self.model.num_queries]
@@ -68,7 +83,12 @@ class ACTPolicy(nn.Module):
             loss_dict['loss'] = loss_dict['l1'] + loss_dict['kl'] * self.kl_weight
             return loss_dict
         else: # inference time
-            a_hat, _, (_, _), new_memory_image = self.model(qpos, image, env_state) # no action, sample from prior
+            a_hat, _, (_, _), new_memory_image = self.model(
+                qpos,
+                image,
+                env_state,
+                memory_image=memory_image,
+            )
             return a_hat, new_memory_image
 
     def configure_optimizers(self):
@@ -81,6 +101,22 @@ class CNNMLPPolicy(nn.Module):
         model, optimizer = build_CNNMLP_model_and_optimizer(args_override, device=device)
         self.model = model # decoder
         self.optimizer = optimizer
+
+    def _normalize_tensor(self, image):
+        channel_count = image.shape[-3]
+        if channel_count == 4:
+            normalize = transforms.Normalize(
+                mean=[0.485, 0.456, 0.406, 0.5],
+                std=[0.229, 0.224, 0.225, 0.5],
+            )
+        elif channel_count == 3:
+            normalize = transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            )
+        else:
+            raise ValueError(f"Unsupported channel count for normalization: {channel_count}")
+        return normalize(image)
 
     def _prepare_image_input(self, image):
         expected_cameras = len(getattr(self.model, "camera_names", []))
@@ -107,9 +143,7 @@ class CNNMLPPolicy(nn.Module):
 
     def __call__(self, qpos, image, actions=None, is_pad=None):
         env_state = None # TODO
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225])
-        image = normalize(image)
+        image = self._normalize_tensor(image)
         image = self._prepare_image_input(image)
         if actions is not None: # training time
             actions = actions[:, 0]

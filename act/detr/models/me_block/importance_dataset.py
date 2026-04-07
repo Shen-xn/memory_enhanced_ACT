@@ -1,0 +1,161 @@
+from __future__ import annotations
+
+import glob
+import os
+import random
+from typing import Dict, List, Tuple
+
+import cv2
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+from .me_block_config import ImportanceModelConfig, ImportanceTrainingConfig
+
+
+def list_task_dirs(data_root: str, image_dirname: str = "four_channel") -> List[str]:
+    return [
+        path
+        for path in sorted(glob.glob(os.path.join(data_root, "task*")))
+        if os.path.isdir(path)
+        and "task_copy" not in path
+        and os.path.isdir(os.path.join(path, image_dirname))
+    ]
+
+
+def list_image_files(image_dir: str) -> List[str]:
+    patterns = ("*.png", "*.jpg", "*.jpeg", "*.JPG", "*.JPEG", "*.PNG")
+    return sorted({path for pattern in patterns for path in glob.glob(os.path.join(image_dir, pattern))})
+
+
+def read_four_channel(path: str) -> np.ndarray:
+    image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise RuntimeError(f"Failed to read image: {path}")
+    if image.ndim != 3 or image.shape[2] != 4:
+        raise RuntimeError(f"Expected a 4-channel PNG, got shape {image.shape} from {path}")
+    return image
+
+
+def read_rgb_image(path: str) -> np.ndarray:
+    image = cv2.imread(path, cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError(f"Failed to read image: {path}")
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise RuntimeError(f"Expected a 3-channel image, got shape {image.shape} from {path}")
+    return image
+
+
+def read_label(path: str) -> np.ndarray:
+    label = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if label is None:
+        raise RuntimeError(f"Failed to read label: {path}")
+    if label.ndim == 3:
+        label = label[:, :, 0]
+    return label.astype(np.int64)
+
+
+def augment_image(image: np.ndarray, config: ImportanceTrainingConfig) -> np.ndarray:
+    if not config.use_augmentation:
+        return image
+
+    rgb = np.clip(image[..., :3], 0.0, 1.0)
+    gamma = random.uniform(config.gamma_min, config.gamma_max)
+    rgb = np.power(rgb, gamma).astype(np.float32)
+
+    if config.noise_std > 0:
+        noise = np.random.normal(0.0, config.noise_std, size=rgb.shape).astype(np.float32)
+        rgb = rgb + noise
+
+    augmented = image.copy()
+    augmented[..., :3] = np.clip(rgb, 0.0, 1.0)
+    return augmented
+
+
+class ImportanceFrameDataset(Dataset):
+    def __init__(
+        self,
+        config: ImportanceTrainingConfig,
+        model_config: ImportanceModelConfig,
+        split: str,
+    ):
+        if split not in {"train", "val"}:
+            raise ValueError(f"Unsupported split: {split}")
+
+        self.config = config
+        self.model_config = model_config
+        self.split = split
+        self.samples = self._load_samples()
+
+    def _load_samples(self) -> List[Dict]:
+        task_dirs = list_task_dirs(self.config.data_root, image_dirname=self.config.image_dirname)
+        if not task_dirs:
+            raise FileNotFoundError(f"No task folders found under {self.config.data_root}")
+
+        eligible_tasks: List[str] = []
+        task_matches: Dict[str, List[Tuple[str, str]]] = {}
+        for task_dir in task_dirs:
+            label_dir = os.path.join(task_dir, self.config.label_dirname)
+            image_dir = os.path.join(task_dir, self.config.image_dirname)
+            if not os.path.isdir(label_dir):
+                continue
+            if not os.path.isdir(image_dir):
+                continue
+            image_paths = list_image_files(image_dir)
+            label_paths = sorted(glob.glob(os.path.join(label_dir, "*.png")))
+            image_map = {os.path.splitext(os.path.basename(path))[0]: path for path in image_paths}
+            label_map = {os.path.splitext(os.path.basename(path))[0]: path for path in label_paths}
+            shared_names = sorted(set(image_map.keys()) & set(label_map.keys()))
+            if shared_names:
+                eligible_tasks.append(task_dir)
+                task_matches[task_dir] = [(image_map[name], label_map[name]) for name in shared_names]
+
+        if not eligible_tasks:
+            raise FileNotFoundError(
+                f"No tasks with both `{self.config.image_dirname}` and `{self.config.label_dirname}` were found."
+            )
+
+        rng = random.Random(self.config.seed)
+        rng.shuffle(eligible_tasks)
+        split_index = max(1, int(len(eligible_tasks) * self.config.train_ratio))
+        train_tasks = set(eligible_tasks[:split_index])
+        selected = train_tasks if self.split == "train" else set(eligible_tasks) - train_tasks
+        if not selected:
+            selected = train_tasks
+
+        samples = []
+        for task_dir in eligible_tasks:
+            if task_dir not in selected:
+                continue
+            for image_path, label_path in task_matches[task_dir]:
+                samples.append(
+                    {
+                        "task": os.path.basename(task_dir),
+                        "image_path": image_path,
+                        "label_path": label_path,
+                    }
+                )
+
+        return samples
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        sample = self.samples[index]
+        reader = read_rgb_image if self.config.image_dirname == "rgb" else read_four_channel
+        image = reader(sample["image_path"]).astype(np.float32) / 255.0
+        if self.split == "train":
+            image = augment_image(image, self.config)
+        label = read_label(sample["label_path"])
+
+        allowed_values = {self.model_config.background_index, self.model_config.unlabeled_index}
+        allowed_values.update(range(1, self.model_config.num_foreground_classes + 1))
+        unique_values = set(int(v) for v in np.unique(label))
+        invalid_values = sorted(unique_values - allowed_values)
+        if invalid_values:
+            raise ValueError(f"Unexpected label values {invalid_values} in {sample['label_path']}.")
+
+        image_tensor = torch.from_numpy(np.transpose(image, (2, 0, 1))).float()
+        label_tensor = torch.from_numpy(label).long()
+        return image_tensor, label_tensor

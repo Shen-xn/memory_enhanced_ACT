@@ -1,26 +1,69 @@
 # memory_enhanced_ACT
 
-这是一个基于 ACT / DETR 改造的模仿学习项目。
+这是一个基于 ACT / DETR 改造的模仿学习项目。仓库里现在有两条已经打通的链路：
 
-当前主线已经打通到：
+1. 主训练链路：直接训练 ACT。
+2. `me_block` 离线链路：标注重要区域 -> 训练 importance segmentation -> 生成 `memory_image_four_channel` -> 再把记忆图喂给 ACT。
 
-- 数据预处理
-- 四通道图像加载
-- ACTPolicy 训练与验证
-- 日志、checkpoint、最优模型保存
-- 配置快照与结构化指标落盘
+当前推荐把 `me_block` 理解为“离线记忆图生成子系统”，而不是“已经接入主训练循环的在线 recurrent 模块”。
 
-目前 `me_block` 相关代码仍主要处于占位 / 预留阶段，还没有真正接入训练闭环。
+`act/detr/models/me_block/README.md` 负责说明模块内部结构；这份根目录 README 负责说明整个项目怎么跑、入口脚本是什么、数据和日志怎么组织。
 
-## 1. 当前主训练入口
+## 1. 快速开始
 
-当前推荐使用的训练入口是：
+下面这些命令都在项目根目录执行：
 
-```bash
+### 检查 CUDA
+
+```powershell
+python cuda_test/torch_cuda.py
+```
+
+主训练默认依赖 GPU；如果 `torch.cuda.is_available()` 为 `False`，主训练基本跑不起来。
+
+### 直接跑主训练
+
+```powershell
 python training.py
 ```
 
-这条主线会走：
+### 走完整的离线 `me_block` 流程
+
+```powershell
+python run_me_block_label_annotator.py
+python run_me_block_train_importance.py
+python run_me_block_generate_memory_images.py --checkpoint .\log\me_block\importance_xxx\best_model.pth
+python training.py
+```
+
+根目录这三个脚本只是薄封装，默认路径如下：
+
+- `run_me_block_label_annotator.py` -> `data_root=./data_process/data`
+- `run_me_block_train_importance.py` -> `data_root=./data_process/data`, `save_root=./log/me_block`
+- `run_me_block_generate_memory_images.py` -> `data_root=./data_process/data`
+
+## 2. 目录和职责
+
+- `training.py`
+  主训练入口，负责训练、验证、checkpoint、日志和续训。
+- `config.py`
+  主训练配置入口。
+- `utils.py`
+  主训练使用的日志、配置快照、曲线绘制、checkpoint、指标记录工具。
+- `data_process/`
+  数据预处理、数据加载和辅助脚本。
+- `cuda_test/`
+  GPU / CUDA 可用性检查。
+- `act/`
+  改造后的 ACT / DETR 主体代码。
+- `act/detr/models/me_block/`
+  `me_block` 的模型、数据集、标注、训练和记忆图生成实现。
+- `log/`
+  主训练实验输出和 `me_block` 训练输出。
+
+## 3. 主训练链路
+
+当前主训练调用关系大致是：
 
 `training.py`
 -> `config.py`
@@ -29,371 +72,283 @@ python training.py
 -> `act/detr/main.py`
 -> `act/detr/models/detr_vae.py`
 
-## 2. 项目结构
+### 3.1 数据约定
 
-- `training.py`
-  当前主训练脚本。
+默认数据根目录：
 
-- `config.py`
-  当前训练和模型的统一配置文件。
-
-- `utils.py`
-  日志、checkpoint、曲线图、结构化指标等通用工具。
-
-- `data_process/`
-  数据预处理、数据加载相关脚本。
-
-- `cuda_test/torch_cuda.py`
-  检查当前 PyTorch / CUDA 是否可用。
-
-- `act/`
-  基于原 ACT 改出来的策略层和模型代码。
-
-- `CODEBASE_SUMMARY.md`
-  更偏开发者视角的代码摘要索引。
-
-## 3. 训练前准备
-
-### 3.1 检查 CUDA
-
-先检查当前环境是否能正常用 GPU：
-
-```bash
-python cuda_test/torch_cuda.py
+```text
+data_process/data/
 ```
 
-如果这里显示 `CUDA available: False`，训练大概率会很慢，或者根本不适合跑。
-
-### 3.2 准备数据
-
-当前训练默认从下面这个目录读取数据：
-
-`data_process/data/`
-
-每个任务目录通常形如：
+每个任务目录应当形如：
 
 ```text
 data_process/data/task_xxx/
 ```
 
-训练实际依赖的是处理后的数据，至少要有：
+主训练目前会扫描所有 `task*` 目录，并跳过名字里包含 `task_copy` 的目录。
 
-- `four_channel/`
+每个任务至少需要：
+
+- `four_channel/*.png`
 - `states_filtered.csv`
 
-如果你后面要启用记忆图像，还会额外读取：
+可选输入：
 
-- `memory_image_four_channel/`
+- `memory_image_four_channel/*.png`
 
-当前 `data_loader` 返回的样本结构是：
+如果存在 `memory_image_four_channel/`，dataloader 会把它作为额外记忆图输入；如果不存在，返回全零记忆图。
 
-- `img`
-  当前帧四通道图像，形状通常是 `[4, H, W]`
+当前 `states_filtered.csv` 至少要包含下面 6 个关节列：
 
-- `curr`
-  当前关节状态，当前默认是 6 维：`j1, j2, j3, j4, j5, j10`
+- `j1`
+- `j2`
+- `j3`
+- `j4`
+- `j5`
+- `j10`
 
-- `future`
-  未来 `FUTURE_STEPS` 步的动作 / 轨迹
+还有几个和代码强相关的细节值得提前知道：
 
-- `m_img`
-  记忆图像。如果文件不存在，会自动用全零图像替代
+- 训练/验证集是“按任务划分”，不是按帧随机划分。
+- 目录名里包含 `obst` 的任务会被视为障碍轨迹，验证时会单独统计一份 `val_obst`。
+- 当前 dataloader 读取记忆图时，按 `000000.png`、`000001.png` 这种 6 位编号去对齐样本，所以 `memory_image_four_channel` 最好保持和原始 `four_channel` 一致的顺序编号。
 
-- `obst`
-  是否为障碍样本
+### 3.2 如何开始新实验
 
-## 4. `training.py` 有哪些功能
+在 [`config.py`](./config.py) 里设置好参数后运行：
 
-`training.py` 是当前最重要的运行脚本。它主要负责下面几件事。
-
-### 4.1 `get_device(config)`
-
-作用：
-
-- 根据 `config.USE_CUDA` 返回当前训练设备
-- 当前主线里的设备选择都统一走这里
-
-### 4.2 `move_tensor_batch_to_device(batch_tensors, device)`
-
-作用：
-
-- 把一批张量统一搬到同一个 device
-- 训练和验证都会用它，避免到处写重复的 `.to(device)`
-
-### 4.3 `prepare_run_config(config)`
-
-作用：
-
-- 如果是新训练：
-  会创建新的实验名和实验目录
-
-- 如果是 resume：
-  会先从 checkpoint 里恢复配置
-  然后继续沿用原实验目录
-
-这一层是现在实验目录管理的关键入口。
-
-### 4.4 `init_model_and_optimizer(config)`
-
-作用：
-
-- 读取 `config.py` 的训练参数和模型参数
-- 构建 `ACTPolicy` 或 `CNNMLPPolicy`
-- 同时创建优化器
-
-当前默认使用的是：
-
-```python
-POLICY_CLASS = "ACTPolicy"
-```
-
-### 4.5 `train_one_epoch(...)`
-
-作用：
-
-- 训练一个 epoch
-- 执行前向、反向传播和优化器更新
-- 聚合本轮训练指标
-- 把训练指标同时写到：
-  - 文本日志
-  - `metrics.jsonl`
-
-输出的训练指标一般包括：
-
-- `loss`
-- `l1`
-- `kl`
-
-如果改成 `CNNMLPPolicy`，则会变成：
-
-- `loss`
-- `mse`
-
-### 4.6 `validate(...)`
-
-作用：
-
-- 执行验证
-- 支持分别评估：
-  - 普通轨迹
-  - 障碍轨迹
-
-验证结果同样会写入：
-
-- 文本日志
-- `metrics.jsonl`
-
-其中结构化指标的 `stage` 会区分为：
-
-- `val`
-- `val_obst`
-
-### 4.7 `main()`
-
-作用：
-
-- 准备实验配置
-- 创建 / 恢复实验目录
-- 加载数据
-- 初始化模型和优化器
-- 处理 resume
-- 训练与验证循环
-- 保存 checkpoint
-- 保存 best model
-- 保存曲线图和结构化指标
-
-## 5. 如何使用训练脚本
-
-### 5.1 开始一个新实验
-
-在 `config.py` 里设置好参数后直接运行：
-
-```bash
+```powershell
 python training.py
 ```
 
-新实验会自动在 `log/exp_时间戳/` 下创建目录。
+如果 `TRAIN_MODE != "resume"`，会自动创建新实验目录：
 
-### 5.2 继续训练
-
-在 `config.py` 里修改：
-
-```python
-self.TRAIN_MODE = "resume"
-self.RESUME_CKPT_PATH = r"你的checkpoint路径"
+```text
+log/exp_YYYYMMDD_HHMMSS/
 ```
 
-然后运行：
+### 3.3 如何断点续训
 
-```bash
+在 [`config.py`](./config.py) 里设置：
+
+```python
+TRAIN_MODE = "resume"
+RESUME_CKPT_PATH = "你的 checkpoint 路径"
+```
+
+然后继续运行：
+
+```powershell
 python training.py
 ```
 
-现在 resume 会继续沿用 checkpoint 里的实验目录，而不是额外开一个新的目录。
+当前续训逻辑会从 checkpoint 里恢复原实验配置，并继续写回原来的实验目录，而不是新开一个目录。RNG 状态也会在 checkpoint 中保存，能尽量接近中断前的训练状态。
 
-## 6. `config.py` 里最常改的参数
+### 3.4 `config.py` 里最常改的内容
 
-下面这些是最常用的配置项。
-
-### 训练相关
+训练相关：
 
 - `TRAIN_MODE`
-  `"train"` 或 `"resume"`
-
 - `RESUME_CKPT_PATH`
-  断点续训时使用的 checkpoint 路径
-
 - `NUM_EPOCHS`
-  总训练轮数
-
 - `BATCH_SIZE`
-  batch 大小
-
 - `NUM_WORKERS`
-  DataLoader worker 数量
-
 - `FUTURE_STEPS`
-  未来动作预测步数
-
 - `LR`
-  主学习率
-
 - `LR_BACKBONE`
-  backbone 学习率
-
 - `LR_ME`
-  `me_block` 学习率
-
+- `WEIGHT_DECAY`
+- `KL_WEIGHT`
 - `VAL_FREQ`
-  每多少个 epoch 做一次验证
-
 - `SAVE_FREQ`
-  每多少个 epoch 存一次 checkpoint
+- `SEED`
 
-### 模型相关
+模型相关：
 
 - `POLICY_CLASS`
-  当前可选：
-  - `ACTPolicy`
-  - `CNNMLPPolicy`
-
 - `CAMERA_NAMES`
-  相机名字列表。当前单相机默认是 `["gemini"]`
-
 - `ME_BLOCK`
-  是否启用记忆模块
-
 - `DEPTH_CHANNEL`
-  是否使用四通道输入
-
 - `BACKBONE`
-  当前默认 `resnet18`
-
+- `ENC_LAYERS_ENC`
 - `ENC_LAYERS`
 - `DEC_LAYERS`
 - `HIDDEN_DIM`
 - `NHEADS`
 - `STATE_DIM`
 
-### 输出相关
+当前推荐保持：
 
-- `SAVE_PLOT`
-  是否保存曲线图
-
-- `LOG_PRINT_FREQ`
-  每多少个 batch 打印一次训练日志
-
-## 7. 实验输出目录里会有什么
-
-每次实验通常会在：
-
-```text
-log/exp_YYYYMMDD_HHMMSS/
+```python
+ME_BLOCK = False
 ```
 
-下面生成这些文件：
+原因不是因为项目里没有 `me_block`，而是因为当前主线的推荐方案是“先离线生成记忆图，再由 dataloader 直接读入”。  
+需要特别说明的是：现在 `cfg.ME_BLOCK = True` 并不会把 `importance segmentation + memory update` 这套离线模型在线插入训练；在 DETR 路径里它目前只是一个兼容占位 stub。
+
+### 3.5 训练输出
+
+每次主训练实验通常会在实验目录下生成：
 
 - `train_exp_xxx.log`
-  文本训练日志
-
 - `config.json`
-  当前实验的可读配置快照
-
 - `metrics.jsonl`
-  结构化指标文件，每行一条 JSON 记录，适合后续批量分析
-
 - `ckpt_epoch_X.pth`
-  普通 checkpoint
-
 - `best_model.pth`
-  当前最优模型
-
 - `training_curves.png`
-  训练 / 验证曲线图
-
-## 8. `metrics.jsonl` 怎么看
-
-这是后续做实验比较最方便的文件。
-
-每一行大概长这样：
-
-```json
-{"epoch": 1, "stage": "train", "metrics": {"loss": 1.23, "kl": 0.45}, "timestamp": "2026-04-05T03:38:41"}
-```
 
 其中：
 
-- `epoch`
-  第几轮
+- `config.json` 是当前实验配置快照。
+- `metrics.jsonl` 是逐轮追加的结构化指标，包含 `train` / `val` / `val_obst`。
+- `best_model.pth` 是按普通验证集 `val.loss` 选出来的当前最优模型。
 
-- `stage`
-  指标阶段，当前可能是：
-  - `train`
-  - `val`
-  - `val_obst`
+## 4. `me_block` 离线工作流
 
-- `metrics`
-  对应阶段的指标字典
+推荐流程始终是下面这 4 步：
 
-- `timestamp`
-  落盘时间
+1. 标注 `importance_labels`
+2. 训练 importance segmentation 模型
+3. 离线生成 `memory_image_four_channel`
+4. 用生成好的记忆图再次运行 `training.py`
 
-后面如果你想做：
+### 4.1 标注
 
-- 筛每次实验的 best val loss
-- 比较不同配置
-- 统一画汇总图
+运行：
 
-优先读这个文件会比解析纯文本日志轻松很多。
+```powershell
+python run_me_block_label_annotator.py
+```
 
-## 9. 当前已知状态
+默认会读取：
 
-- 单相机四通道输入已经兼容
-- 设备管理已经从主训练链路里去掉了硬编码 `.cuda()`
-- 日志、checkpoint、best model、配置快照、结构化指标已经能一起落盘
-- `me_block` 仍然没有正式接入训练主线
+```text
+./data_process/data
+```
 
-## 10. 建议的使用顺序
+并在每个任务目录下写出：
 
-1. 先运行 `python cuda_test/torch_cuda.py`
-2. 确认 `config.py` 里的训练参数
-3. 确认 `data_process/data/` 下数据已经处理完毕
-4. 运行 `python training.py`
-5. 训练过程中重点看：
-   - `train_exp_xxx.log`
-   - `metrics.jsonl`
-   - `best_model.pth`
+```text
+task_xxx/
+  importance_labels/
+  importance_labels_meta.json
+```
 
-## 11. 开发说明
+标签约定现在是“三值监督”模式：
 
-如果你后面继续开发，推荐优先查看：
+- `1` -> target
+- `2` -> goal
+- `3` -> arm
+- `0` -> 显式 background
+- `255` -> 未标注 / 忽略
 
-- [`README.md`](/c:/Users/DELL/Desktop/me_ACT/memory_enhanced_ACT/README.md)
-- [`CODEBASE_SUMMARY.md`](/c:/Users/DELL/Desktop/me_ACT/memory_enhanced_ACT/CODEBASE_SUMMARY.md)
-- [`training.py`](/c:/Users/DELL/Desktop/me_ACT/memory_enhanced_ACT/training.py)
-- [`config.py`](/c:/Users/DELL/Desktop/me_ACT/memory_enhanced_ACT/config.py)
+也就是说，大多数区域你可以留成未标注，不用手工刷满整张背景；但在容易和前景混淆的区域，仍然可以补少量 `background` 负样本。
 
-如果后面正式接 `me_block`，最重要的入口会是：
+标注器是 OpenCV 交互窗口，支持逐帧涂抹、清空、复制前一帧、按任务切换等操作。当前实现支持稀疏标注，不要求一个任务的全部帧都标完；只要 `four_channel` 和 `importance_labels` 里存在同名 PNG，就能进入训练集。未标注区域在训练时会被忽略，不参与 loss。
 
-- `act/detr/models/me_block/`
-- `act/detr/models/detr_vae.py`
+### 4.2 训练 importance 模型
+
+运行：
+
+```powershell
+python run_me_block_train_importance.py
+```
+
+默认参数：
+
+- `data_root = ./data_process/data`
+- `save_root = ./log/me_block`
+
+常见覆盖方式：
+
+```powershell
+python run_me_block_train_importance.py --data-root ./data_process/data --save-root ./log/me_block --epochs 30 --batch-size 4 --num-workers 4
+```
+
+该脚本也支持 `--cpu`，但实际训练速度会明显慢很多。
+
+输出目录通常是：
+
+```text
+log/me_block/importance_YYYYMMDD_HHMMSS/
+```
+
+里面一般包含：
+
+- `config.json`
+- `metrics.jsonl`
+- `latest_model.pth`
+- `best_model.pth`
+
+### 4.3 生成记忆图
+
+训练完成后运行：
+
+```powershell
+python run_me_block_generate_memory_images.py --checkpoint .\log\me_block\importance_xxx\best_model.pth
+```
+
+默认仍然读取：
+
+```text
+./data_process/data
+```
+
+会在每个任务目录下生成：
+
+- `memory_image_four_channel/`
+- `memory_scores/`
+- `memory_binary_masks/`
+- `memory_image_meta.json`
+
+如果某个任务已经完整生成过，脚本会跳过；想强制重写可以加 `--force`。这个脚本同样支持 `--cpu`。
+
+### 4.4 再接回 ACT
+
+记忆图生成完成后，不需要改 `training.py` 本身。只要保证：
+
+```python
+ME_BLOCK = False
+```
+
+然后直接运行：
+
+```powershell
+python training.py
+```
+
+主训练 dataloader 会自动检查每个任务下是否存在 `memory_image_four_channel/`，存在就读取，不存在就回退到全零记忆图。
+
+## 5. 现在这个仓库的真实边界
+
+目前已经完成并可用的部分：
+
+- 单相机四通道输入主训练
+- checkpoint / best model / 配置快照 / 结构化指标记录
+- resume 到原实验目录
+- 离线 `me_block` 标注、训练、记忆图生成
+- 主训练自动读取离线记忆图
+
+目前还没有真正打通的部分：
+
+- 在线联合训练版 `me_block`
+- 把 `importance segmentation + memory update` 作为主训练中的可学习 recurrent 子模块
+
+## 6. 建议先看哪些文件
+
+如果你是第一次接手这个仓库，建议阅读顺序：
+
+1. [`README.md`](./README.md)
+2. [`training.py`](./training.py)
+3. [`config.py`](./config.py)
+4. [`data_process/data_loader.py`](./data_process/data_loader.py)
+5. [`act/detr/models/me_block/README.md`](./act/detr/models/me_block/README.md)
+
+如果你接下来主要改 `me_block`，再继续看：
+
+1. [`act/detr/models/me_block/me_block_config.py`](./act/detr/models/me_block/me_block_config.py)
+2. [`act/detr/models/me_block/importance_dataset.py`](./act/detr/models/me_block/importance_dataset.py)
+3. [`act/detr/models/me_block/memory_gate_model.py`](./act/detr/models/me_block/memory_gate_model.py)
+4. [`act/detr/models/me_block/train_importance_model.py`](./act/detr/models/me_block/train_importance_model.py)
+5. [`act/detr/models/me_block/generate_memory_images.py`](./act/detr/models/me_block/generate_memory_images.py)
