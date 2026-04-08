@@ -3,7 +3,7 @@ import argparse
 
 import torch
 
-from .models import build_CNNMLP_model, build_me_ACT_model
+from .models import build_ACT_model, build_CNNMLP_model
 
 
 class ArgsObject:
@@ -17,7 +17,6 @@ def get_args_parser():
     parser = argparse.ArgumentParser("Set transformer detector", add_help=False)
     parser.add_argument("--lr", default=1e-4, type=float)
     parser.add_argument("--lr_backbone", default=1e-5, type=float)
-    parser.add_argument("--lr_me", default=1e-5, type=float)
     parser.add_argument("--batch_size", default=2, type=int)
     parser.add_argument("--weight_decay", default=1e-4, type=float)
     parser.add_argument("--epochs", default=300, type=int)
@@ -25,7 +24,12 @@ def get_args_parser():
     parser.add_argument("--clip_max_norm", default=0.1, type=float, help="gradient clipping max norm")
 
     # Model parameters
-    parser.add_argument("--me_block", default=False, type=bool, help="If true, model will include me_block")
+    parser.add_argument(
+        "--use_memory_image_input",
+        default=False,
+        type=bool,
+        help="If true, ACT uses image + memory_image as dual visual inputs.",
+    )
     parser.add_argument(
         "--depth_channel",
         default=False,
@@ -106,10 +110,6 @@ def _move_model_to_device(model, device=None):
 
 
 def _freeze_module_if_present(model, module_name):
-    """
-    Freeze a submodule only when it exists and is not None.
-    This avoids crashes for optional modules like me_block.
-    """
     module = getattr(model, module_name, None)
     if module is not None:
         module.requires_grad_(False)
@@ -117,42 +117,31 @@ def _freeze_module_if_present(model, module_name):
     return False
 
 
-def build_me_ACT_model_and_optimizer(args_override, device=None):
+def build_ACT_model_and_optimizer(args_override, device=None):
     args = _build_args_object(args_override)
 
-    model = build_me_ACT_model(args)
+    model = build_ACT_model(args)
     model = _move_model_to_device(model, device)
-
-    for param in model.parameters():
-        param.requires_grad = True
 
     if args.lr_backbone <= 0:
         if not _freeze_module_if_present(model, "backbone"):
             _freeze_module_if_present(model, "backbones")
 
-    if args.lr_me <= 0:
-        _freeze_module_if_present(model, "me_block")
-
     param_dicts = [
         {
-            "params": [
-                p
-                for n, p in model.named_parameters()
-                if "backbone" not in n and "me_block" not in n and p.requires_grad
-            ]
+            "params": [p for n, p in model.named_parameters() if "backbone" not in n and p.requires_grad]
         },
         {
             "params": [p for n, p in model.named_parameters() if "backbone" in n and p.requires_grad],
             "lr": args.lr_backbone,
         },
-        {
-            "params": [p for n, p in model.named_parameters() if "me_block" in n and p.requires_grad],
-            "lr": args.lr_me,
-        },
     ]
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
     return model, optimizer
+
+
+build_me_ACT_model_and_optimizer = build_ACT_model_and_optimizer
 
 
 def build_CNNMLP_model_and_optimizer(args_override, device=None):

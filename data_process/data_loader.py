@@ -19,6 +19,7 @@ class ImitationDataset(Dataset):
         self,
         data_root,
         future_steps=10,
+        use_memory_image_input=False,
         mode="train",
         train_ratio=0.8,
         seed=42,
@@ -28,6 +29,7 @@ class ImitationDataset(Dataset):
     ):
         self.data_root = data_root
         self.future_steps = future_steps
+        self.use_memory_image_input = use_memory_image_input
         self.mode = mode
         self.normalize_joints = normalize_joints
         self.strict_alignment = strict_alignment
@@ -60,7 +62,7 @@ class ImitationDataset(Dataset):
 
             # --------------------- 检查 memory 图像文件夹 ---------------------
             mem_img_dir = os.path.join(task_dir, "memory_image_four_channel")
-            has_memory_folder = os.path.exists(mem_img_dir)
+            has_memory_folder = self.use_memory_image_input and os.path.exists(mem_img_dir)
 
             if not os.path.exists(img_dir) or not os.path.exists(csv_path):
                 print(f"{task_name} 缺失文件，跳过")
@@ -167,7 +169,7 @@ class ImitationDataset(Dataset):
         img = self.transform(np.array(img))
 
         # --------------------- 加载 memory 图像（不存在则返回全零） ---------------------
-        if s["has_mem_img"]:
+        if self.use_memory_image_input and s["has_mem_img"]:
             m_img = Image.open(s["mem_img_path"])
             m_img = self.transform(np.array(m_img))
         else:
@@ -185,12 +187,21 @@ class ImitationDataset(Dataset):
 def get_data_loaders(
     data_root,
     future_steps=10,
+    use_memory_image_input=False,
     batch_size=8,
     num_workers=0
 ):
-    train_dataset = ImitationDataset(data_root, future_steps, mode="train")
+    train_dataset = ImitationDataset(
+        data_root,
+        future_steps,
+        use_memory_image_input=use_memory_image_input,
+        mode="train",
+    )
     val_dataset = ImitationDataset(
-        data_root, future_steps, mode="val",
+        data_root,
+        future_steps,
+        use_memory_image_input=use_memory_image_input,
+        mode="val",
         joint_min_max=train_dataset.joint_min_max
     )
 

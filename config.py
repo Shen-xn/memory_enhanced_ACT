@@ -24,7 +24,6 @@ class Config:
 
         self.LR = 1e-4
         self.LR_BACKBONE = 1e-5
-        self.LR_ME = 0.0
         self.WEIGHT_DECAY = 1e-4
         self.KL_WEIGHT = 1.0
 
@@ -42,7 +41,7 @@ class Config:
 
         # ===================== 模型参数（显式顶层定义，方便引用） =====================
         self.CAMERA_NAMES = ["gemini"]
-        self.ME_BLOCK = False
+        self.USE_MEMORY_IMAGE_INPUT = False
         self.DEPTH_CHANNEL = True
         self.BACKBONE = "resnet18"
         self.POSITION_EMBEDDING = "sine"
@@ -88,7 +87,7 @@ class Config:
 
         self.MODEL_PARAMS = {
             "camera_names": self.CAMERA_NAMES,
-            "me_block": self.ME_BLOCK,
+            "use_memory_image_input": self.USE_MEMORY_IMAGE_INPUT,
             "depth_channel": self.DEPTH_CHANNEL,
             "backbone": self.BACKBONE,
             "position_embedding": self.POSITION_EMBEDDING,

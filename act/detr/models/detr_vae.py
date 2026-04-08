@@ -9,7 +9,6 @@ from .backbone import build_backbone
 from .transformer import build_transformer, TransformerEncoder, TransformerEncoderLayer
 
 import numpy as np
-from .me_block.memory_gate_model import build_me_block
 
 import IPython
 e = IPython.embed
@@ -35,7 +34,7 @@ def get_sinusoid_encoding_table(n_position, d_hid):
 
 class DETRVAE(nn.Module):
     """ This is the DETR module that performs object detection """
-    def __init__(self, backbones, transformer, encoder, me_block, state_dim, num_queries, camera_names):
+    def __init__(self, backbones, transformer, encoder, state_dim, num_queries, camera_names, use_memory_image_input):
         """ Initializes the model.
         Parameters:
             backbones: torch module of the backbone to be used. See backbone.py
@@ -48,13 +47,13 @@ class DETRVAE(nn.Module):
         super().__init__()
         self.num_queries = num_queries
         self.camera_names = camera_names
+        self.use_memory_image_input = use_memory_image_input
         self.transformer = transformer
         self.encoder = encoder
         hidden_dim = transformer.d_model
         self.action_head = nn.Linear(hidden_dim, state_dim)
         self.is_pad_head = nn.Linear(hidden_dim, 1)
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
-        self.me_block = me_block
         
         if backbones is not None:
             self.input_proj = nn.Conv2d(backbones[0].num_channels, hidden_dim, kernel_size=1)
@@ -116,10 +115,6 @@ class DETRVAE(nn.Module):
             latent_sample = torch.zeros([bs, self.latent_dim], dtype=torch.float32).to(qpos.device)
             latent_input = self.latent_out_proj(latent_sample)
 
-        new_memory_image = None
-        if self.me_block is not None and memory_image is not None:
-            new_memory_image = self.me_block(memory_image, image)
-        
         if self.backbones is not None:
             # Image observation features and position embeddings
             all_cam_features = []
@@ -131,9 +126,8 @@ class DETRVAE(nn.Module):
                 all_cam_features.append(self.input_proj(features))
                 all_cam_pos.append(pos)
                 
-            memory_source = new_memory_image if new_memory_image is not None else memory_image
-            if memory_source is not None:
-                features, pos = self.backbones[0](memory_source)
+            if self.use_memory_image_input and memory_image is not None:
+                features, pos = self.backbones[0](memory_image)
                 features = features[0] # take the last layer feature
                 pos = pos[0]
                 all_cam_features.append(self.input_proj(features))
@@ -167,7 +161,7 @@ class DETRVAE(nn.Module):
             )[0]
         a_hat = self.action_head(hs)
         is_pad_hat = self.is_pad_head(hs)
-        return a_hat, is_pad_hat, [mu, logvar], new_memory_image
+        return a_hat, is_pad_hat, [mu, logvar]
 
 
 
@@ -258,15 +252,6 @@ def build_encoder(args):
 
 
 def build(args):
-
-    # From state
-    # backbone = None # from state for now, no need for conv nets
-    # From image
-    if args.me_block:
-        me_block = build_me_block()
-    else:
-        me_block = None
-        
     backbones = []
     backbone = build_backbone(args)
     backbones.append(backbone)
@@ -279,10 +264,10 @@ def build(args):
         backbones=backbones,
         transformer=transformer,
         encoder=encoder,
-        me_block=me_block,
         state_dim=args.state_dim,
         num_queries=args.num_queries,
         camera_names=args.camera_names,
+        use_memory_image_input=args.use_memory_image_input,
     )
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)

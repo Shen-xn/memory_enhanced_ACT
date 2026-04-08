@@ -348,8 +348,7 @@ class MemoryImageUpdater(nn.Module):
         flat_scores = scores.view(batch_size, -1)
         keep_count = max(1, math.ceil(keep_ratio * flat_scores.shape[1]))
         topk_indices = flat_scores.topk(keep_count, dim=1).indices
-        flat_mask = torch.zeros_like(flat_scores, dtype=torch.bool)
-        flat_mask.scatter_(1, topk_indices, True)
+        flat_mask = torch.zeros_like(flat_scores, dtype=torch.float32).scatter(1, topk_indices, 1.0).to(torch.bool)
         return flat_mask.view(batch_size, 1, height, width)
 
     def step(

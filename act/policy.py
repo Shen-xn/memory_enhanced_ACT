@@ -3,17 +3,18 @@ import torch
 from torch.nn import functional as F
 import torchvision.transforms as transforms
 
-from act.detr.main import build_me_ACT_model_and_optimizer, build_CNNMLP_model_and_optimizer
+from act.detr.main import build_ACT_model_and_optimizer, build_CNNMLP_model_and_optimizer
 import IPython
 e = IPython.embed
 
 class ACTPolicy(nn.Module):
     def __init__(self, args_override, device=None):
         super().__init__()
-        model, optimizer = build_me_ACT_model_and_optimizer(args_override, device=device)
+        model, optimizer = build_ACT_model_and_optimizer(args_override, device=device)
         self.model = model # CVAE decoder
         self.optimizer = optimizer
         self.kl_weight = args_override['kl_weight']
+        self.use_memory_image_input = bool(args_override.get("use_memory_image_input", False))
         print(f'KL Weight {self.kl_weight}')
 
     def _normalize_tensor(self, image):
@@ -66,14 +67,16 @@ class ACTPolicy(nn.Module):
         image = self._normalize_tensor(image)
         image = self._prepare_image_input(image)
         
-        if memory_image is not None:
+        if self.use_memory_image_input and memory_image is not None:
             memory_image = self._normalize_tensor(memory_image)
+        else:
+            memory_image = None
         
         if actions is not None: # training time
             actions = actions[:, :self.model.num_queries]
             is_pad = is_pad[:, :self.model.num_queries]
 
-            a_hat, is_pad_hat, (mu, logvar), new_memory_image = self.model(qpos, image, env_state, memory_image, actions, is_pad)
+            a_hat, is_pad_hat, (mu, logvar) = self.model(qpos, image, env_state, memory_image, actions, is_pad)
             total_kld, dim_wise_kld, mean_kld = kl_divergence(mu, logvar)
             loss_dict = dict()
             all_l1 = F.l1_loss(actions, a_hat, reduction='none')
@@ -83,13 +86,13 @@ class ACTPolicy(nn.Module):
             loss_dict['loss'] = loss_dict['l1'] + loss_dict['kl'] * self.kl_weight
             return loss_dict
         else: # inference time
-            a_hat, _, (_, _), new_memory_image = self.model(
+            a_hat, _, (_, _) = self.model(
                 qpos,
                 image,
                 env_state,
                 memory_image=memory_image,
             )
-            return a_hat, new_memory_image
+            return a_hat
 
     def configure_optimizers(self):
         return self.optimizer

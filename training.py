@@ -60,7 +60,6 @@ def init_model_and_optimizer(config):
     args_override = {
         "lr": config.LR,
         "lr_backbone": config.LR_BACKBONE,
-        "lr_me": config.LR_ME,
         "weight_decay": config.WEIGHT_DECAY,
         "kl_weight": config.KL_WEIGHT,
         **config.MODEL_PARAMS
@@ -85,23 +84,26 @@ def train_one_epoch(model, train_loader, optimizer, epoch, config, logger):
     
     pbar = tqdm(enumerate(train_loader), total=total_batches, desc=f"Train Epoch {epoch}")
     for batch_idx, (imgs, currs, futures, m_imgs, obsts) in pbar:
-        imgs, currs, futures, m_imgs = move_tensor_batch_to_device(
-            (imgs, currs, futures, m_imgs),
-            device,
-        )
+        tensors = (imgs, currs, futures, m_imgs) if config.USE_MEMORY_IMAGE_INPUT else (imgs, currs, futures)
+        moved = move_tensor_batch_to_device(tensors, device)
+        imgs, currs, futures = moved[:3]
+        if config.USE_MEMORY_IMAGE_INPUT:
+            m_imgs = moved[3]
         
         # 前向传播
         optimizer.zero_grad()
         if config.POLICY_CLASS == "ACTPolicy":
             # ACTPolicy需要memory_image和is_pad（这里is_pad设为全False）
             is_pad = torch.zeros((futures.shape[0], futures.shape[1]), dtype=torch.bool, device=futures.device)
-            loss_dict = model(
-                qpos=currs,
-                image=imgs,
-                memory_image=m_imgs,
-                actions=futures,
-                is_pad=is_pad
-            )
+            model_kwargs = {
+                "qpos": currs,
+                "image": imgs,
+                "actions": futures,
+                "is_pad": is_pad,
+            }
+            if config.USE_MEMORY_IMAGE_INPUT:
+                model_kwargs["memory_image"] = m_imgs
+            loss_dict = model(**model_kwargs)
         else:
             # CNNMLPPolicy
             loss_dict = model(
@@ -164,21 +166,24 @@ def validate(model, val_loader, config, logger, epoch, is_obst=False):
             if len(imgs) == 0:
                 continue
             
-            imgs, currs, futures, m_imgs = move_tensor_batch_to_device(
-                (imgs, currs, futures, m_imgs),
-                device,
-            )
+            tensors = (imgs, currs, futures, m_imgs) if config.USE_MEMORY_IMAGE_INPUT else (imgs, currs, futures)
+            moved = move_tensor_batch_to_device(tensors, device)
+            imgs, currs, futures = moved[:3]
+            if config.USE_MEMORY_IMAGE_INPUT:
+                m_imgs = moved[3]
             
             # 前向传播
             if config.POLICY_CLASS == "ACTPolicy":
                 is_pad = torch.zeros((futures.shape[0], futures.shape[1]), dtype=torch.bool, device=futures.device)
-                loss_dict = model(
-                    qpos=currs,
-                    image=imgs,
-                    memory_image=m_imgs,
-                    actions=futures,
-                    is_pad=is_pad
-                )
+                model_kwargs = {
+                    "qpos": currs,
+                    "image": imgs,
+                    "actions": futures,
+                    "is_pad": is_pad,
+                }
+                if config.USE_MEMORY_IMAGE_INPUT:
+                    model_kwargs["memory_image"] = m_imgs
+                loss_dict = model(**model_kwargs)
             else:
                 loss_dict = model(
                     qpos=currs,
@@ -212,6 +217,7 @@ def main():
     train_loader, val_loader = get_data_loaders(
         data_root=cfg.DATA_ROOT,
         future_steps=cfg.FUTURE_STEPS,
+        use_memory_image_input=cfg.USE_MEMORY_IMAGE_INPUT,
         batch_size=cfg.BATCH_SIZE,
         num_workers=cfg.NUM_WORKERS
     )

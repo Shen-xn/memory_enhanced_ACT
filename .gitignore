@@ -3,6 +3,10 @@ logs
 wandb
 outputs
 data
+.deploy_artifacts_baseline
+.deploy_artifacts_test
+deploy_artifacts_baseline/
+deploy_artifacts_test/
 log
 data_local
 .vscode
@@ -13,6 +17,7 @@ _wandb
 fuse.cfg
 
 *.ai
+*.zip
 
 # Generation results
 results/
