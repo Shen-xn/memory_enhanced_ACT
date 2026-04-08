@@ -105,7 +105,7 @@ DeployConfig ActPipeline::LoadConfig(const std::string& path) {
 }
 
 torch::Device ActPipeline::ParseDevice(const std::string& device) {
-  if (device == "cuda" && torch::cuda::is_available()) {
+  if (device == "cuda") {
     return torch::Device(torch::kCUDA);
   }
   return torch::Device(torch::kCPU);

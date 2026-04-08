@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "act_pipeline.h"
+#include "ros_robot_controller_msgs/msg/get_bus_servo_cmd.hpp"
 #include "ros_robot_controller_msgs/msg/servo_position.hpp"
 #include "ros_robot_controller_msgs/msg/servos_position.hpp"
 #include "ros_robot_controller_msgs/srv/get_bus_servo_state.hpp"
@@ -81,7 +82,7 @@ class MeActInferenceNode : public rclcpp::Node {
 
     rgb_sub_.subscribe(this, rgb_topic_);
     depth_sub_.subscribe(this, depth_topic_);
-    sync_ = std::make_shared<Synchronizer>(Synchronizer(SyncPolicy(sync_queue_size_), rgb_sub_, depth_sub_));
+    sync_ = std::make_shared<Synchronizer>(SyncPolicy(sync_queue_size_), rgb_sub_, depth_sub_);
     sync_->registerCallback(
         std::bind(&MeActInferenceNode::OnSyncedImages, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -290,21 +291,42 @@ class MeActInferenceNode : public rclcpp::Node {
       return std::nullopt;
     }
 
+    auto request = std::make_shared<ros_robot_controller_msgs::srv::GetBusServoState::Request>();
+    request->cmd.reserve(servo_ids_.size());
+    for (const auto servo_id : servo_ids_) {
+      ros_robot_controller_msgs::msg::GetBusServoCmd cmd;
+      cmd.id = static_cast<uint8_t>(servo_id);
+      cmd.get_position = 1;
+      request->cmd.push_back(cmd);
+    }
+
+    const auto future = servo_state_client_->async_send_request(request);
+    if (future.wait_for(500ms) != std::future_status::ready) {
+      RCLCPP_WARN(get_logger(), "Timeout while querying bus servo state.");
+      return std::nullopt;
+    }
+
+    const auto response = future.get();
+    if (!response->success || response->state.empty()) {
+      RCLCPP_WARN(get_logger(), "GetBusServoState returned no valid state.");
+      return std::nullopt;
+    }
+
     std::vector<float> qpos;
     qpos.reserve(servo_ids_.size());
-
-    for (const auto servo_id : servo_ids_) {
-      auto request = std::make_shared<ros_robot_controller_msgs::srv::GetBusServoState::Request>();
-      request->id = servo_id;
-      auto future = servo_state_client_->async_send_request(request);
-
-      if (future.wait_for(200ms) != std::future_status::ready) {
-        RCLCPP_WARN(get_logger(), "Timeout while querying servo %d state.", servo_id);
-        return std::nullopt;
+    for (const auto& bus_state : response->state) {
+      for (const auto position : bus_state.position) {
+        qpos.push_back(static_cast<float>(position));
       }
+    }
 
-      const auto response = future.get();
-      qpos.push_back(static_cast<float>(response->position));
+    if (qpos.size() != servo_ids_.size()) {
+      RCLCPP_WARN(
+          get_logger(),
+          "Expected %zu servo positions, but got %zu from GetBusServoState.",
+          servo_ids_.size(),
+          qpos.size());
+      return std::nullopt;
     }
 
     return qpos;
@@ -313,13 +335,13 @@ class MeActInferenceNode : public rclcpp::Node {
   void PublishServoCommand(const std::vector<float>& action) {
     ros_robot_controller_msgs::msg::ServosPosition msg;
     msg.duration = static_cast<float>(command_duration_ms_) / 1000.0f;
-    msg.servos.reserve(servo_ids_.size());
+    msg.position.reserve(servo_ids_.size());
 
     for (size_t i = 0; i < servo_ids_.size(); ++i) {
       ros_robot_controller_msgs::msg::ServoPosition servo;
       servo.id = servo_ids_[i];
       servo.position = ClampToPhysicalRange(static_cast<int>(std::lround(action[i])), i);
-      msg.servos.push_back(servo);
+      msg.position.push_back(servo);
     }
 
     servo_command_pub_->publish(msg);
