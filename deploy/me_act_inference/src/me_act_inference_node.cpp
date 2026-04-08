@@ -102,11 +102,18 @@ class MeActInferenceNode : public rclcpp::Node {
         std::bind(&MeActInferenceNode::OnControlTimer, this));
 
     state_ = enable_inference_on_start_ ? RunState::RUNNING : RunState::IDLE;
+    if (enable_me_block_ && !pipeline_->UsesMemoryImageInput()) {
+      RCLCPP_WARN(get_logger(), "enable_me_block=true, but exported ACT is a single-image model. me_block will be ignored.");
+    }
+    if (enable_me_block_ && pipeline_->UsesMemoryImageInput() && !pipeline_->HasMeBlock()) {
+      throw std::runtime_error("enable_me_block=true, but deploy_dir does not contain me_block_inference.pt.");
+    }
     RCLCPP_INFO(
         get_logger(),
-        "me_act_inference_node ready. state=%s deploy_dir=%s",
+        "me_act_inference_node ready. state=%s deploy_dir=%s enable_me_block=%s",
         ToString(state_).c_str(),
-        deploy_dir_.c_str());
+        deploy_dir_.c_str(),
+        enable_me_block_ ? "true" : "false");
   }
 
  private:
@@ -137,6 +144,7 @@ class MeActInferenceNode : public rclcpp::Node {
     declare_parameter<int>("max_state_image_skew_ms", 150);
     declare_parameter<int>("sync_queue_size", 10);
     declare_parameter<bool>("enable_inference_on_start", false);
+    declare_parameter<bool>("enable_me_block", false);
     declare_parameter<std::vector<int64_t>>("servo_ids", {1, 2, 3, 4, 5, 10});
     declare_parameter<std::vector<int64_t>>("init_center", {500, 560, 120, 180, 500, 240});
     declare_parameter<int>("init_random_range", 100);
@@ -157,6 +165,7 @@ class MeActInferenceNode : public rclcpp::Node {
     max_state_image_skew_ms_ = get_parameter("max_state_image_skew_ms").as_int();
     sync_queue_size_ = get_parameter("sync_queue_size").as_int();
     enable_inference_on_start_ = get_parameter("enable_inference_on_start").as_bool();
+    enable_me_block_ = get_parameter("enable_me_block").as_bool();
     servo_ids_ = ToIntVector(get_parameter("servo_ids").as_integer_array());
     init_center_ = ToIntVector(get_parameter("init_center").as_integer_array());
     init_random_range_ = get_parameter("init_random_range").as_int();
@@ -255,7 +264,7 @@ class MeActInferenceNode : public rclcpp::Node {
 
     try {
       const auto infer_started = get_clock()->now();
-      const auto trajectory = pipeline_->Predict(frame->rgb_bgr, frame->depth_raw, *qpos, false);
+      const auto trajectory = pipeline_->Predict(frame->rgb_bgr, frame->depth_raw, *qpos, enable_me_block_);
       const auto infer_finished = get_clock()->now();
       if (trajectory.empty() || trajectory.front().size() != servo_ids_.size()) {
         EnterFault("ACT returned an empty trajectory or wrong action dimension.");
@@ -439,6 +448,7 @@ class MeActInferenceNode : public rclcpp::Node {
   int max_state_image_skew_ms_ = 150;
   int sync_queue_size_ = 10;
   bool enable_inference_on_start_ = false;
+  bool enable_me_block_ = false;
   std::vector<int> servo_ids_;
   std::vector<int> init_center_;
   int init_random_range_ = 100;

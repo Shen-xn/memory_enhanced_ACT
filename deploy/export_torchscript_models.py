@@ -135,6 +135,14 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
     use_memory_image_input = bool(normalize_act_config(act_config)["use_memory_image_input"])
     joint_stats = get_fixed_joint_stats()
 
+    if args.me_block_checkpoint and not use_memory_image_input:
+        raise ValueError("ACT checkpoint is a single-image model. Do not export me_block for a baseline ACT deployment.")
+    if use_memory_image_input and not args.me_block_checkpoint:
+        raise ValueError(
+            "ACT checkpoint expects memory_image input. Current deploy pipeline requires --me-block-checkpoint "
+            "to produce memory_image online."
+        )
+
     if use_memory_image_input:
         act_wrapper = ACTDualImageInferenceWrapper(
             act_policy.model,

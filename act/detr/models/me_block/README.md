@@ -79,6 +79,18 @@ python run_me_block_train_importance.py --epochs 30 --batch-size 4 --gamma-min 0
 - 随机 gamma：`0.6 ~ 1.8`
 - 高斯噪声：默认 `std = 0.02`
 
+## 正式训练机上的建议流程
+
+1. 先准备 `rgb/`、`four_channel/` 和 `states_filtered.csv`
+2. 标注一批 `importance_labels`
+3. 先小规模训练确认 loss / mIoU 能下降
+4. 再扩充标注，重新训练正式 `me_block`
+5. 训练结束后至少留好：
+   - `best_model.pth`
+   - `config.json`
+   - `metrics.jsonl`
+6. 如果后面要部署 me_act，再把这个 `best_model.pth` 和双图 ACT 一起导出
+
 ## 生成逻辑
 
 生成入口：
@@ -129,3 +141,16 @@ write_mask = importance_score > decayed_score + tau_up
 2. 在 ACT 主训练里打开 `USE_MEMORY_IMAGE_INPUT = True`
 
 也就是说，ACT 只把记忆图当第二张输入图使用，不在线执行这里的 segmentation/gate。
+
+## 真机部署时的关系
+
+当前仓库支持两种使用方式：
+
+1. 离线生成记忆图，再训练双图 ACT
+2. 部署时把训练好的 `me_block` 一起导出，在线生成 `memory_image`
+
+如果你后面部署的是在线 me_act，那么需要：
+
+1. 一个训练好的 `me_block` checkpoint
+2. 一个训练好的双图 ACT checkpoint
+3. 用这两个 checkpoint 一起导出 `deploy_artifacts_memory`

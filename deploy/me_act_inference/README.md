@@ -1,28 +1,36 @@
 # me_act_inference
 
-这个目录就是要放进 Jetson ROS2 工作区 `src/` 里的完整包。
-
-例如：
+这个目录就是放进 Jetson ROS2 工作区 `src/` 的完整包，例如：
 
 ```bash
 ~/ros2_ws/src/me_act_inference
 ```
 
-## 当前功能
+## 两种运行模式
 
-当前节点是 baseline ACT 在线推理节点：
+### 1. baseline ACT
 
 ```text
 rgb + depth + servo_state(service) -> preprocess(BGRA) -> ACT -> action_seq[0] -> bus_servo/set_position
 ```
 
-当前不做：
+启动：
 
-- `me_block`
-- 时间聚合
-- 关力矩急停
+```bash
+ros2 launch me_act_inference me_act_baseline.launch.py
+```
 
-急停只是停止继续发新动作。
+### 2. me_act（在线 `me_block`）
+
+```text
+rgb + depth + servo_state(service) -> preprocess(BGRA) -> me_block -> memory_image -> ACT -> action_seq[0] -> bus_servo/set_position
+```
+
+启动：
+
+```bash
+ros2 launch me_act_inference me_act_memory.launch.py
+```
 
 ## 节点接口
 
@@ -39,14 +47,97 @@ rgb + depth + servo_state(service) -> preprocess(BGRA) -> ACT -> action_seq[0] -
 
 - `/ros_robot_controller/bus_servo/set_position`
 
-额外控制 service：
+控制 service：
 
 - `~/initialize`
 - `~/start`
 - `~/stop`
 - `~/emergency_stop`
 
-## 初始化
+## 编译
+
+如果环境已经写进 `~/.zshrc`，直接：
+
+```bash
+export Torch_DIR=$(python3 -c "import torch, os; print(os.path.join(torch.utils.cmake_prefix_path, 'Torch'))")
+colcon build --symlink-install \
+  --packages-select me_act_inference \
+  --cmake-args -DTorch_DIR=$Torch_DIR
+```
+
+如果没有自动 source，再先：
+
+```bash
+source /opt/ros/humble/setup.zsh
+source /home/ubuntu/third_party_ros2/third_party_ws/install/setup.zsh
+source /home/ubuntu/third_party_ros2/orbbec_ws/install/setup.zsh
+source /home/ubuntu/ros2_ws/install/setup.zsh
+```
+
+## 启动前一定要改
+
+### baseline
+
+改：
+
+- [`launch/me_act_baseline.launch.py`](./launch/me_act_baseline.launch.py)
+
+至少确认：
+
+- `deploy_dir`
+- `device`
+
+例如：
+
+```text
+/home/ubuntu/my_models/me_act/deploy_artifacts_baseline
+```
+
+### memory 版
+
+改：
+
+- [`launch/me_act_memory.launch.py`](./launch/me_act_memory.launch.py)
+
+至少确认：
+
+- `deploy_dir`
+- `device`
+
+例如：
+
+```text
+/home/ubuntu/my_models/me_act/deploy_artifacts_memory
+```
+
+## 调试顺序
+
+1. 启动节点
+2. 初始化：
+
+```bash
+ros2 service call /me_act_inference_node/initialize std_srvs/srv/Trigger "{}"
+```
+
+3. 开始：
+
+```bash
+ros2 service call /me_act_inference_node/start std_srvs/srv/Trigger "{}"
+```
+
+4. 停止：
+
+```bash
+ros2 service call /me_act_inference_node/stop std_srvs/srv/Trigger "{}"
+```
+
+5. 急停：
+
+```bash
+ros2 service call /me_act_inference_node/emergency_stop std_srvs/srv/Trigger "{}"
+```
+
+## 初始化说明
 
 初始化中心姿态：
 
@@ -61,83 +152,23 @@ min = [0, 0, 0, 0, 0, 100]
 max = [1000, 1000, 1000, 1000, 1000, 700]
 ```
 
-## 编译
+## 最重要的检查项
 
-如果这些环境已经写进 `~/.zshrc`，直接在工作区根目录执行：
+- baseline launch 默认 `enable_me_block = False`
+- memory launch 默认 `enable_me_block = True`
+- 如果 memory launch 打开了 `enable_me_block`，但导出目录里没有 `me_block_inference.pt`，节点会直接启动失败
+- baseline 和 memory 版的导出目录不要混用
+- 双图 ACT 必须是重新按当前代码口径训练出来的模型
 
-```bash
-export Torch_DIR=$(python3 -c "import torch, os; print(os.path.join(torch.utils.cmake_prefix_path, 'Torch'))")
-colcon build --symlink-install \
-  --packages-select me_act_inference \
-  --cmake-args -DTorch_DIR=$Torch_DIR
-```
+## 你后面自己排查时优先看哪几处
 
-如果没有自动 source，再先 source：
-
-```bash
-source /opt/ros/humble/setup.zsh
-source /home/ubuntu/third_party_ros2/third_party_ws/install/setup.zsh
-source /home/ubuntu/third_party_ros2/orbbec_ws/install/setup.zsh
-source /home/ubuntu/ros2_ws/install/setup.zsh
-```
-
-## 启动前要改
-
-修改：
-
-- [`launch/me_act_baseline.launch.py`](./launch/me_act_baseline.launch.py)
-
-至少确认：
-
-- `deploy_dir`
-- `device`
-
-其中 `deploy_dir` 要指向你 Jetson 上真实的导出目录，比如：
-
-```text
-/home/ubuntu/my_models/me_act/deploy_artifacts_baseline
-```
-
-## 启动
-
-```bash
-ros2 launch me_act_inference me_act_baseline.launch.py
-```
-
-## 调试顺序
-
-先初始化：
-
-```bash
-ros2 service call /me_act_inference_node/initialize std_srvs/srv/Trigger "{}"
-```
-
-再开始：
-
-```bash
-ros2 service call /me_act_inference_node/start std_srvs/srv/Trigger "{}"
-```
-
-停止：
-
-```bash
-ros2 service call /me_act_inference_node/stop std_srvs/srv/Trigger "{}"
-```
-
-急停：
-
-```bash
-ros2 service call /me_act_inference_node/emergency_stop std_srvs/srv/Trigger "{}"
-```
-
-## 说明
-
-当前代码已经按这套接口对齐过：
-
-- `ros_robot_controller_msgs/srv/GetBusServoState`
-- `ros_robot_controller_msgs/msg/ServosPosition`
-- `ros_robot_controller_msgs/msg/ServoPosition`
-
-如果你后面换平台，最常改的地方还是：
+1. `deploy_dir` 是否指对
+2. `ros2 topic list` / `ros2 service list` 是否包含相机和舵机接口
+3. `initialize` 是否成功
+4. 节点日志里是否出现：
+   - frame 太旧
+   - image/state skew 太大
+   - servo state service timeout
+5. 如果换平台后消息字段不一致，优先改：
 
 - [`src/me_act_inference_node.cpp`](./src/me_act_inference_node.cpp)

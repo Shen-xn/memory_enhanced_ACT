@@ -55,6 +55,8 @@ std::vector<std::vector<float>> ActPipeline::PredictFromFourChannel(
       memory_tensor = outputs->elements()[0].toTensor();
       prev_memory_ = outputs->elements()[1].toTensor();
       prev_scores_ = outputs->elements()[2].toTensor();
+    } else if (use_me_block) {
+      throw std::runtime_error("me_block was requested, but me_block_inference.pt is not loaded.");
     } else {
       ResetMemory();
     }

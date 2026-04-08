@@ -12,7 +12,7 @@ def generate_launch_description():
                 output="screen",
                 parameters=[
                     {
-                        "deploy_dir": "/home/ubuntu/my_models/me_act/deploy_artifacts_baseline",
+                        "deploy_dir": "/home/ubuntu/my_models/me_act/deploy_artifacts_memory",
                         "device": "cpu",
                         "rgb_topic": "/depth_cam/rgb/image_raw",
                         "depth_topic": "/depth_cam/depth/image_raw",
@@ -24,7 +24,7 @@ def generate_launch_description():
                         "max_state_image_skew_ms": 150,
                         "sync_queue_size": 10,
                         "enable_inference_on_start": False,
-                        "enable_me_block": False,
+                        "enable_me_block": True,
                         "servo_ids": [1, 2, 3, 4, 5, 10],
                         "init_center": [500, 560, 120, 180, 500, 240],
                         "init_random_range": 100,

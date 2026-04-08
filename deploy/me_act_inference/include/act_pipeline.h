@@ -35,6 +35,8 @@ class ActPipeline {
       bool use_me_block = true);
 
   void ResetMemory();
+  bool UsesMemoryImageInput() const { return config_.use_memory_image_input; }
+  bool HasMeBlock() const { return me_block_loaded_; }
 
  private:
   DeployConfig config_;

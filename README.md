@@ -137,6 +137,100 @@ RESUME_CKPT_PATH = "你的 checkpoint 路径"
 
 然后再运行 `python training.py`。
 
+## 你后面在正式机器上的推荐顺序
+
+### 路线 A：baseline ACT
+
+适用场景：
+
+- 先做最稳的部署基线
+- 不使用 `me_block`
+
+步骤：
+
+1. 准备正式数据集
+   - 每个任务目录至少有 `four_channel/` 和 `states_filtered.csv`
+2. 在 [`config.py`](./config.py) 里确认：
+   - `USE_MEMORY_IMAGE_INPUT = False`
+   - `DATA_ROOT` 指向正式数据集
+3. 训练：
+
+```powershell
+python training.py
+```
+
+4. 导出：
+
+```powershell
+python deploy/export_torchscript_models.py --act-checkpoint .\log\exp_xxx\best_model.pth --output-dir .\deploy_artifacts_baseline --smoke-test
+```
+
+5. Jetson / ROS2 启动 baseline：
+
+```bash
+ros2 launch me_act_inference me_act_baseline.launch.py
+```
+
+### 路线 B：me_act（`me_block` + 双图 ACT）
+
+适用场景：
+
+- 想测试在线 `me_block -> ACT`
+- 最终部署 me_act
+
+步骤：
+
+1. 先准备给 `me_block` 用的数据
+   - 标注/训练 importance 用 `rgb/`
+   - 生成记忆图和在线部署都用 `four_channel/`
+2. 标注：
+
+```powershell
+python run_me_block_label_annotator.py
+```
+
+3. 训练 `me_block`：
+
+```powershell
+python run_me_block_train_importance.py
+```
+
+4. 如果你想先验证离线记忆图质量，先生成一遍：
+
+```powershell
+python run_me_block_generate_memory_images.py --checkpoint .\log\me_block\importance_xxx\best_model.pth --debug
+```
+
+5. 训练双图 ACT
+   - 在 [`config.py`](./config.py) 里确认 `USE_MEMORY_IMAGE_INPUT = True`
+   - 再运行：
+
+```powershell
+python training.py
+```
+
+6. 导出 me_act：
+
+```powershell
+python deploy/export_torchscript_models.py --act-checkpoint .\log\exp_xxx\best_model.pth --me-block-checkpoint .\log\me_block\importance_xxx\best_model.pth --output-dir .\deploy_artifacts_memory --smoke-test
+```
+
+7. Jetson / ROS2 启动 memory 版：
+
+```bash
+ros2 launch me_act_inference me_act_memory.launch.py
+```
+
+## 正式训练前的检查清单
+
+- 这次训练出来的 ACT 必须和当前代码口径一致，旧 ACT checkpoint 不建议继续沿用
+- `four_channel` 统一按 OpenCV `BGRA` 口径处理
+- 关节归一化统一按固定物理范围，不再按数据集统计
+- baseline 导出时不要带 `--me-block-checkpoint`
+- 双图 ACT 导出时必须带 `--me-block-checkpoint`
+- ROS2 launch 里的 `deploy_dir` 要改成目标机器真实路径
+- 真机前先在导出机上跑一遍 `--smoke-test`
+
 ## `me_block` 离线流程
 
 详细说明看 [`act/detr/models/me_block/README.md`](./act/detr/models/me_block/README.md)。
@@ -159,6 +253,12 @@ RESUME_CKPT_PATH = "你的 checkpoint 路径"
 
 ```text
 rgb + depth + qpos -> preprocess(BGRA) -> ACT -> action sequence
+```
+
+如果部署的是双图 ACT，也支持：
+
+```text
+rgb + depth + qpos -> preprocess(BGRA) -> me_block -> memory_image -> ACT -> action sequence
 ```
 
 ROS2 节点支持：
