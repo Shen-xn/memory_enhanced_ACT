@@ -12,7 +12,7 @@ def generate_launch_description():
                 output="screen",
                 parameters=[
                     {
-                        "deploy_dir": "/home/ubuntu/deploy_artifacts_baseline",
+                        "deploy_dir": "/home/ubuntu/my_models/me_act/deploy_artifacts_baseline",
                         "device": "cpu",
                         "rgb_topic": "/depth_cam/rgb/image_raw",
                         "depth_topic": "/depth_cam/depth/image_raw",

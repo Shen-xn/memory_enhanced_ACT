@@ -16,7 +16,7 @@ if str(PROJECT_DIR) not in sys.path:
 
 from act.policy import ACTPolicy
 from act.detr.models.me_block.generate_memory_images import load_model_from_checkpoint as load_me_block_model
-from data_process.data_loader import ImitationDataset
+from data_process.data_loader import get_fixed_joint_stats
 from deploy.deploy_wrappers import (
     ACTDualImageInferenceWrapper,
     ACTSingleImageInferenceWrapper,
@@ -37,7 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--act-checkpoint", type=str, required=True, help="Path to ACT checkpoint (.pth).")
     parser.add_argument("--output-dir", type=str, required=True, help="Directory for exported deployment artifacts.")
     parser.add_argument("--me-block-checkpoint", type=str, default="", help="Optional me_block checkpoint (.pth).")
-    parser.add_argument("--data-root", type=str, default="", help="Override dataset root used to recompute joint stats.")
+    parser.add_argument(
+        "--data-root",
+        type=str,
+        default="",
+        help="Compatibility argument. Export now uses fixed physical joint limits instead of dataset statistics.",
+    )
     parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"], help="Device used during export.")
     parser.add_argument("--smoke-test", action="store_true", help="Run one forward pass through exported TorchScript files.")
     return parser.parse_args()
@@ -103,18 +108,6 @@ def load_act_policy(checkpoint_path: str, device: torch.device) -> Tuple[ACTPoli
     return policy, checkpoint["config"]
 
 
-def compute_joint_stats(data_root: str, future_steps: int, seed: int, use_memory_image_input: bool) -> Dict:
-    dataset = ImitationDataset(
-        data_root=data_root,
-        future_steps=future_steps,
-        use_memory_image_input=use_memory_image_input,
-        mode="train",
-        seed=seed,
-        normalize_joints=True,
-    )
-    return dataset.joint_min_max
-
-
 def _trace_and_save(module: torch.nn.Module, example_inputs: Tuple[torch.Tensor, ...], output_path: str) -> None:
     traced = torch.jit.trace(module.eval(), example_inputs, strict=False)
     traced = torch.jit.freeze(traced)
@@ -140,16 +133,7 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
 
     act_policy, act_config = load_act_policy(args.act_checkpoint, device=device)
     use_memory_image_input = bool(normalize_act_config(act_config)["use_memory_image_input"])
-    data_root = args.data_root or act_config.get("DATA_ROOT", "")
-    if not data_root:
-        raise ValueError("ACT checkpoint does not contain DATA_ROOT. Please pass --data-root.")
-
-    joint_stats = compute_joint_stats(
-        data_root=data_root,
-        future_steps=int(act_config.get("FUTURE_STEPS", act_policy.model.num_queries)),
-        seed=int(act_config.get("SEED", 42)),
-        use_memory_image_input=use_memory_image_input,
-    )
+    joint_stats = get_fixed_joint_stats()
 
     if use_memory_image_input:
         act_wrapper = ACTDualImageInferenceWrapper(

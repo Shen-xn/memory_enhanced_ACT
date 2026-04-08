@@ -1,77 +1,28 @@
-# `me_act_inference`
+# me_act_inference
 
-这个目录就是后面直接放到 Jetson `src/` 里的 **完整 ROS2 包**。
+这个目录就是要放进 Jetson ROS2 工作区 `src/` 里的完整包。
 
-你只需要把整个目录复制到：
+例如：
 
 ```bash
-~/me_act_ws/src/me_act_inference
+~/ros2_ws/src/me_act_inference
 ```
-
-然后编译即可，不需要再额外拼接 `cpp/` 或 `ros2/` 目录。
 
 ## 当前功能
 
-当前是 baseline ACT 在线推理节点：
+当前节点是 baseline ACT 在线推理节点：
 
-`rgb + depth + servo_state(service) -> 预处理 -> ACT -> action_seq[0] -> /ros_robot_controller/bus_servo/set_position`
-
-特点：
-
-- 不接 `me_block`
-- 不做时间聚合
-- 用 service 读取舵机状态
-- 有急停和重初始化
-- 急停时只是不再发新动作，不关力矩
-
-## 目录说明
-
-- `CMakeLists.txt`
-- `package.xml`
-- `include/act_pipeline.h`
-- `src/act_pipeline.cpp`
-- `src/me_act_inference_node.cpp`
-- `launch/me_act_baseline.launch.py`
-
-## Jetson 上怎么放
-
-把：
-
-- `deploy/me_act_inference/`
-
-复制成：
-
-```bash
-~/me_act_ws/src/me_act_inference
+```text
+rgb + depth + servo_state(service) -> preprocess(BGRA) -> ACT -> action_seq[0] -> bus_servo/set_position
 ```
 
-另外把模型导出目录单独放，比如：
+当前不做：
 
-```bash
-~/me_act_models/deploy_artifacts_baseline
-```
+- `me_block`
+- 时间聚合
+- 关力矩急停
 
-## 编译
-
-```bash
-cd ~/me_act_ws
-source /opt/ros/humble/setup.bash
-export Torch_DIR=$(python3 -c "import torch, os; print(os.path.join(torch.utils.cmake_prefix_path, 'Torch'))")
-colcon build --symlink-install --cmake-args -DTorch_DIR=$Torch_DIR
-```
-
-## 启动前先改
-
-先改：
-
-- `launch/me_act_baseline.launch.py`
-
-至少确认：
-
-- `deploy_dir`
-- `device`
-
-是你 Jetson 上的真实值。
+急停只是停止继续发新动作。
 
 ## 节点接口
 
@@ -88,29 +39,105 @@ colcon build --symlink-install --cmake-args -DTorch_DIR=$Torch_DIR
 
 - `/ros_robot_controller/bus_servo/set_position`
 
-额外服务：
+额外控制 service：
 
+- `~/initialize`
 - `~/start`
 - `~/stop`
 - `~/emergency_stop`
-- `~/initialize`
 
 ## 初始化
 
 初始化中心姿态：
 
-- `[500, 560, 120, 180, 500, 240]`
+```text
+[500, 560, 120, 180, 500, 240]
+```
 
-每次 `~/initialize` 时，在每个关节上叠加 `±100` 范围随机扰动，并裁剪到：
+每次初始化都会加 `±100` 随机扰动，再裁剪到：
 
-- `min = [0, 0, 0, 0, 0, 100]`
-- `max = [1000, 1000, 1000, 1000, 1000, 700]`
+```text
+min = [0, 0, 0, 0, 0, 100]
+max = [1000, 1000, 1000, 1000, 1000, 700]
+```
 
-## 重要提醒
+## 编译
 
-当前代码是按你资料里的接口名写的。  
-如果 Jetson 上 `ros_robot_controller_msgs` 里的字段名和这里假设的不完全一致，通常只需要改：
+如果这些环境已经写进 `~/.zshrc`，直接在工作区根目录执行：
 
-- `src/me_act_inference_node.cpp`
+```bash
+export Torch_DIR=$(python3 -c "import torch, os; print(os.path.join(torch.utils.cmake_prefix_path, 'Torch'))")
+colcon build --symlink-install \
+  --packages-select me_act_inference \
+  --cmake-args -DTorch_DIR=$Torch_DIR
+```
 
-里很小一段消息映射代码。
+如果没有自动 source，再先 source：
+
+```bash
+source /opt/ros/humble/setup.zsh
+source /home/ubuntu/third_party_ros2/third_party_ws/install/setup.zsh
+source /home/ubuntu/third_party_ros2/orbbec_ws/install/setup.zsh
+source /home/ubuntu/ros2_ws/install/setup.zsh
+```
+
+## 启动前要改
+
+修改：
+
+- [`launch/me_act_baseline.launch.py`](./launch/me_act_baseline.launch.py)
+
+至少确认：
+
+- `deploy_dir`
+- `device`
+
+其中 `deploy_dir` 要指向你 Jetson 上真实的导出目录，比如：
+
+```text
+/home/ubuntu/my_models/me_act/deploy_artifacts_baseline
+```
+
+## 启动
+
+```bash
+ros2 launch me_act_inference me_act_baseline.launch.py
+```
+
+## 调试顺序
+
+先初始化：
+
+```bash
+ros2 service call /me_act_inference_node/initialize std_srvs/srv/Trigger "{}"
+```
+
+再开始：
+
+```bash
+ros2 service call /me_act_inference_node/start std_srvs/srv/Trigger "{}"
+```
+
+停止：
+
+```bash
+ros2 service call /me_act_inference_node/stop std_srvs/srv/Trigger "{}"
+```
+
+急停：
+
+```bash
+ros2 service call /me_act_inference_node/emergency_stop std_srvs/srv/Trigger "{}"
+```
+
+## 说明
+
+当前代码已经按这套接口对齐过：
+
+- `ros_robot_controller_msgs/srv/GetBusServoState`
+- `ros_robot_controller_msgs/msg/ServosPosition`
+- `ros_robot_controller_msgs/msg/ServoPosition`
+
+如果你后面换平台，最常改的地方还是：
+
+- [`src/me_act_inference_node.cpp`](./src/me_act_inference_node.cpp)

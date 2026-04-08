@@ -300,7 +300,7 @@ class MeActInferenceNode : public rclcpp::Node {
       request->cmd.push_back(cmd);
     }
 
-    const auto future = servo_state_client_->async_send_request(request);
+    auto future = servo_state_client_->async_send_request(request);
     if (future.wait_for(500ms) != std::future_status::ready) {
       RCLCPP_WARN(get_logger(), "Timeout while querying bus servo state.");
       return std::nullopt;

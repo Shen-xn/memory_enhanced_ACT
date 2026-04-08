@@ -28,8 +28,6 @@ class _BaseActInferenceWrapper(nn.Module):
         return actions * self.joint_rng.view(1, 1, -1) + self.joint_min.view(1, 1, -1)
 
     def _normalize_bgra_image(self, image: torch.Tensor) -> torch.Tensor:
-        if image.dim() != 4 or image.size(1) != 4:
-            raise ValueError(f"Expected [B, 4, H, W], got {tuple(image.shape)}.")
         image = image[:, [2, 1, 0, 3]]
         return (image - self.image_mean) / self.image_std
 

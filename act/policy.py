@@ -20,11 +20,19 @@ class ACTPolicy(nn.Module):
     def _normalize_tensor(self, image):
         channel_count = image.shape[-3]
         if channel_count == 4:
+            if image.dim() == 4:
+                image = image[:, [2, 1, 0, 3]]
+            elif image.dim() == 5:
+                image = image[:, :, [2, 1, 0, 3]]
             normalize = transforms.Normalize(
                 mean=[0.485, 0.456, 0.406, 0.5],
                 std=[0.229, 0.224, 0.225, 0.5],
             )
         elif channel_count == 3:
+            if image.dim() == 4:
+                image = image[:, [2, 1, 0]]
+            elif image.dim() == 5:
+                image = image[:, :, [2, 1, 0]]
             normalize = transforms.Normalize(
                 mean=[0.485, 0.456, 0.406],
                 std=[0.229, 0.224, 0.225],
@@ -108,11 +116,19 @@ class CNNMLPPolicy(nn.Module):
     def _normalize_tensor(self, image):
         channel_count = image.shape[-3]
         if channel_count == 4:
+            if image.dim() == 4:
+                image = image[:, [2, 1, 0, 3]]
+            elif image.dim() == 5:
+                image = image[:, :, [2, 1, 0, 3]]
             normalize = transforms.Normalize(
                 mean=[0.485, 0.456, 0.406, 0.5],
                 std=[0.229, 0.224, 0.225, 0.5],
             )
         elif channel_count == 3:
+            if image.dim() == 4:
+                image = image[:, [2, 1, 0]]
+            elif image.dim() == 5:
+                image = image[:, :, [2, 1, 0]]
             normalize = transforms.Normalize(
                 mean=[0.485, 0.456, 0.406],
                 std=[0.229, 0.224, 0.225],

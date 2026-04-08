@@ -1,17 +1,36 @@
-"""
-升级版 · 模仿学习数据加载器
-支持：主四通道图 + memory_image_four_channel + 关节 + 障碍标签
-"""
+"""ACT data loading with fixed joint limits and OpenCV BGRA images."""
 
-import os
 import glob
+import os
+import random
+
+import cv2
 import numpy as np
 import pandas as pd
-from PIL import Image
 import torch
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-import random
+from torch.utils.data import DataLoader, Dataset
+
+
+FIXED_JOINT_MIN = np.array([0, 0, 0, 0, 0, 100], dtype=np.float32)
+FIXED_JOINT_MAX = np.array([1000, 1000, 1000, 1000, 1000, 700], dtype=np.float32)
+FIXED_JOINT_RNG = FIXED_JOINT_MAX - FIXED_JOINT_MIN
+
+
+def get_fixed_joint_stats():
+    return {
+        "min": FIXED_JOINT_MIN.copy(),
+        "max": FIXED_JOINT_MAX.copy(),
+        "rng": FIXED_JOINT_RNG.copy(),
+    }
+
+
+def load_bgra_tensor(path):
+    image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise FileNotFoundError(f"Failed to read image: {path}")
+    if image.ndim != 3 or image.shape[2] != 4:
+        raise ValueError(f"Expected a 4-channel image, got shape {image.shape} from {path}")
+    return torch.from_numpy(image.copy()).permute(2, 0, 1).float().div_(255.0)
 
 
 class ImitationDataset(Dataset):
@@ -34,16 +53,12 @@ class ImitationDataset(Dataset):
         self.normalize_joints = normalize_joints
         self.strict_alignment = strict_alignment
         self.joint_min_max = joint_min_max
-
-        self.transform = transforms.Compose([
-            transforms.ToTensor(),
-        ])
         
         self.all_samples = self._load_all_samples()
         self._split_by_task(train_ratio, seed)
 
         if normalize_joints and self.joint_min_max is None:
-            self.joint_min_max = self._compute_joint_stats()
+            self.joint_min_max = get_fixed_joint_stats()
         
         if normalize_joints:
             self._normalize_joints()
@@ -138,19 +153,6 @@ class ImitationDataset(Dataset):
 
         print(f"{self.mode.upper()} 集样本数：{len(self.samples)}")
 
-    def _compute_joint_stats(self):
-        all_joints = []
-        for s in self.samples:
-            all_joints.append(s["curr"])
-            all_joints.extend(s["future"])
-        
-        arr = np.array(all_joints)
-        joint_min = arr.min(axis=0)
-        joint_max = arr.max(axis=0)
-        joint_rng = joint_max - joint_min
-        joint_rng[joint_rng == 0] = 1.0
-        return {"min": joint_min, "max": joint_max, "rng": joint_rng}
-
     def _normalize_joints(self):
         jmin = self.joint_min_max["min"]
         jrng = self.joint_min_max["rng"]
@@ -165,13 +167,11 @@ class ImitationDataset(Dataset):
         s = self.samples[idx]
 
         # --------------------- 加载主图像 ---------------------
-        img = Image.open(s["img_path"])
-        img = self.transform(np.array(img))
+        img = load_bgra_tensor(s["img_path"])
 
         # --------------------- 加载 memory 图像（不存在则返回全零） ---------------------
         if self.use_memory_image_input and s["has_mem_img"]:
-            m_img = Image.open(s["mem_img_path"])
-            m_img = self.transform(np.array(m_img))
+            m_img = load_bgra_tensor(s["mem_img_path"])
         else:
             m_img = torch.zeros_like(img)
 
