@@ -16,13 +16,12 @@ find_package(OpenCV REQUIRED)
 find_package(Torch REQUIRED)
 
 add_executable(me_act_inference_node
+  src/act_pipeline.cpp
   src/me_act_inference_node.cpp
-  ../cpp/src/act_pipeline.cpp
 )
 
 target_include_directories(me_act_inference_node PRIVATE
   include
-  ../cpp/include
   ${OpenCV_INCLUDE_DIRS}
 )
 

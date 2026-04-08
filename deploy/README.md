@@ -22,14 +22,20 @@ python memory_enhanced_ACT/deploy/export_torchscript_models.py ^
 - `me_block_inference.pt`（可选）
 - `deploy_config.yml`
 
-## C++ 接口
+## ROS2 / C++ 运行包
+
+真正拿到 Jetson `src/` 里编译的运行代码，现在统一放在：
+
+- `deploy/me_act_inference/`
+
+这个目录本身就是一个完整 ROS2 包。
 
 核心类在：
 
-- `deploy/cpp/include/act_pipeline.h`
-- `deploy/cpp/src/act_pipeline.cpp`
+- `deploy/me_act_inference/include/act_pipeline.h`
+- `deploy/me_act_inference/src/act_pipeline.cpp`
 
-接口：
+主要接口：
 
 - `ActPipeline::Predict(bgr, depth, qpos, use_me_block)`
 - `ActPipeline::PredictFromFourChannel(four_channel_bgra, qpos, use_me_block)`
@@ -43,22 +49,18 @@ python memory_enhanced_ACT/deploy/export_torchscript_models.py ^
 - `me_block` 直接吃 `BGRA`。
 - `ACT` wrapper 内部会把 `BGRA` 转成训练时对应的 `RGBA` 再归一化。
 
-## Linux / Jetson 构建
+## Jetson 上怎么放
+
+模型导出目录单独放，比如：
 
 ```bash
-cd memory_enhanced_ACT/deploy/cpp
-cmake -S . -B build \
-  -DCMAKE_PREFIX_PATH=/path/to/libtorch \
-  -DOpenCV_DIR=/path/to/opencv
-cmake --build build --config Release
+~/me_act_models/deploy_artifacts_baseline
 ```
 
-## Demo
+运行包直接放进 ROS2 工作区：
 
 ```bash
-./build/act_infer_demo \
-  /path/to/deploy_artifacts \
-  /path/to/rgb.jpg \
-  /path/to/depth.png \
-  "0.1,0.2,0.3,0.4,0.5,0.6"
+~/me_act_ws/src/me_act_inference
 ```
+
+然后按 `deploy/me_act_inference/README.md` 里的说明编译和启动。
