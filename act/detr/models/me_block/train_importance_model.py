@@ -5,13 +5,14 @@ import json
 import os
 from datetime import datetime
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .me_block_config import MEBlockConfig, default_me_block_config, save_config
-from .importance_dataset import ImportanceFrameDataset
+from .importance_dataset import ImportanceFrameDataset, read_label
 from .memory_gate_model import ImportanceMemoryModel, checkpoint_payload
 
 
@@ -136,6 +137,26 @@ def append_metrics(log_path: str, epoch: int, stage: str, metrics: dict) -> None
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def compute_class_weights(train_dataset: ImportanceFrameDataset) -> torch.Tensor:
+    num_classes = train_dataset.model_config.num_output_classes
+    unlabeled_index = train_dataset.model_config.unlabeled_index
+    class_counts = np.zeros(num_classes, dtype=np.float64)
+
+    for sample in train_dataset.samples:
+        label = read_label(sample["label_path"])
+        valid = label != unlabeled_index
+        if not np.any(valid):
+            continue
+        bincount = np.bincount(label[valid].reshape(-1), minlength=num_classes)
+        class_counts += bincount[:num_classes]
+
+    class_counts = np.maximum(class_counts, 1.0)
+    class_freq = class_counts / class_counts.sum()
+    class_weights = 1.0 / np.sqrt(class_freq)
+    class_weights = class_weights / class_weights.mean()
+    return torch.tensor(class_weights, dtype=torch.float32)
+
+
 def main(default_data_root: str = "", default_save_root: str = "") -> None:
     args = parse_args(default_data_root=default_data_root, default_save_root=default_save_root)
     config = resolve_config(args)
@@ -169,7 +190,25 @@ def main(default_data_root: str = "", default_save_root: str = "") -> None:
     )
 
     model = ImportanceMemoryModel(config=config).to(device)
-    criterion = nn.CrossEntropyLoss(ignore_index=config.importance.unlabeled_index)
+    class_weights = compute_class_weights(train_dataset).to(device)
+    print(f"Class weights: {class_weights.detach().cpu().tolist()}")
+    with open(os.path.join(save_dir, "class_weights.json"), "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "background": float(class_weights[0].item()),
+                **{
+                    name: float(class_weights[idx].item())
+                    for idx, name in enumerate(config.importance.class_names, start=1)
+                },
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+    criterion = nn.CrossEntropyLoss(
+        weight=class_weights,
+        ignore_index=config.importance.unlabeled_index,
+    )
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.training.learning_rate,

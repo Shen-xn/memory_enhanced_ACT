@@ -55,6 +55,10 @@ class Occluder:
     bgr_color: np.ndarray
     base_radius: float
     spawn_frame: int
+    patch_offset: np.ndarray
+    rgb_texture: np.ndarray
+    depth_texture: np.ndarray
+    alpha_texture: np.ndarray
 
     def polygon(self) -> np.ndarray:
         pts = self.relative_polygon + self.center[None, :]
@@ -71,6 +75,8 @@ class Occluder:
             "bgr_color": [int(v) for v in self.bgr_color.tolist()],
             "base_radius": float(self.base_radius),
             "spawn_frame": int(self.spawn_frame),
+            "patch_offset": [int(self.patch_offset[0]), int(self.patch_offset[1])],
+            "depth_range": [int(self.depth_texture.min()), int(self.depth_texture.max())],
         }
 
 
@@ -184,12 +190,94 @@ def compose_preview(
 
 
 def sample_occluder_color(rng: np.random.Generator) -> np.ndarray:
+    hue_raw = int(rng.integers(0, 256))
     hsv = np.array(
-        [[[rng.integers(0, 180), rng.integers(35, 110), rng.integers(55, 150)]]],
+        [[[int(round(hue_raw * 179.0 / 255.0)), rng.integers(30, 201), rng.integers(50, 201)]]],
         dtype=np.uint8,
     )
     color = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0]
     return color.astype(np.uint8)
+
+
+def _low_frequency_noise(
+    rng: np.random.Generator,
+    height: int,
+    width: int,
+    coarse_h: int,
+    coarse_w: int,
+) -> np.ndarray:
+    coarse = rng.normal(0.0, 1.0, size=(coarse_h, coarse_w)).astype(np.float32)
+    noise = cv2.resize(coarse, (width, height), interpolation=cv2.INTER_CUBIC)
+    noise = cv2.GaussianBlur(noise, (0, 0), sigmaX=max(1.0, width * 0.015), sigmaY=max(1.0, height * 0.015))
+    noise -= noise.mean()
+    noise /= max(noise.std(), 1e-6)
+    return noise
+
+
+def _build_occluder_textures(
+    polygon: np.ndarray,
+    base_radius: float,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    soft_edge = max(10, int(base_radius * 0.12))
+    min_xy = np.floor(polygon.min(axis=0)).astype(np.int32) - soft_edge * 2
+    max_xy = np.ceil(polygon.max(axis=0)).astype(np.int32) + soft_edge * 2
+    size = np.maximum(max_xy - min_xy + 1, 1)
+    patch_w, patch_h = int(size[0]), int(size[1])
+
+    local_polygon = np.round(polygon - min_xy[None, :]).astype(np.int32)
+    mask = np.zeros((patch_h, patch_w), dtype=np.uint8)
+    cv2.fillPoly(mask, [local_polygon], 255)
+
+    alpha = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), sigmaX=soft_edge * 0.45, sigmaY=soft_edge * 0.45)
+    alpha = np.clip(alpha, 0.0, 1.0)
+    alpha[mask > 0] = np.maximum(alpha[mask > 0], 0.7)
+
+    yy, xx = np.mgrid[0:patch_h, 0:patch_w].astype(np.float32)
+    center_x = (patch_w - 1) * 0.5
+    center_y = (patch_h - 1) * 0.5
+    nx = (xx - center_x) / max(center_x, 1.0)
+    ny = (yy - center_y) / max(center_y, 1.0)
+    radial = np.sqrt(nx * nx + ny * ny)
+    radial = np.clip(radial, 0.0, 1.0)
+
+    light_angle = rng.uniform(0.0, 2.0 * np.pi)
+    directional = 0.5 * (nx * np.cos(light_angle) + ny * np.sin(light_angle) + 1.0)
+
+    noise_large = _low_frequency_noise(rng, patch_h, patch_w, 5, 5)
+    noise_small = _low_frequency_noise(rng, patch_h, patch_w, 10, 10)
+
+    hue_raw = float(rng.integers(0, 256))
+    hue = np.full((patch_h, patch_w), hue_raw * 179.0 / 255.0, dtype=np.float32)
+    hue += noise_large * 6.0 + noise_small * 2.0
+    hue = np.mod(hue, 180.0)
+
+    sat_base = float(rng.integers(30, 201))
+    val_base = float(rng.integers(50, 201))
+    sat = sat_base + noise_large * 18.0 - radial * 20.0
+    val = val_base + directional * 35.0 + noise_small * 16.0 - radial * 28.0
+    sat = np.clip(sat, 30.0, 200.0)
+    val = np.clip(val, 50.0, 200.0)
+
+    hsv = np.stack([hue, sat, val], axis=-1).astype(np.uint8)
+    rgb_texture = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+    edge_glow = cv2.GaussianBlur(alpha, (0, 0), sigmaX=max(1.0, soft_edge * 0.8), sigmaY=max(1.0, soft_edge * 0.8))
+    edge_glow = np.clip(edge_glow - alpha * 0.7, 0.0, 1.0)
+    rgb_texture = np.clip(
+        rgb_texture.astype(np.float32) * (0.85 + 0.25 * directional[..., None]) + edge_glow[..., None] * 20.0,
+        0.0,
+        255.0,
+    ).astype(np.uint8)
+
+    depth_base = float(rng.uniform(0.0, 28.0))
+    depth_bump = (1.0 - radial) * rng.uniform(18.0, 42.0)
+    depth_noise = noise_large * 5.0 + noise_small * 2.0
+    depth_texture = np.clip(depth_base + depth_bump + depth_noise, 0.0, 64.0).astype(np.uint8)
+
+    mean_alpha = max(alpha.sum(), 1e-6)
+    mean_color = (rgb_texture.astype(np.float32) * alpha[..., None]).sum(axis=(0, 1)) / mean_alpha
+    return min_xy.astype(np.float32), rgb_texture, depth_texture, alpha.astype(np.float32), mean_color.astype(np.uint8)
 
 
 def build_random_occluder(
@@ -200,7 +288,7 @@ def build_random_occluder(
     rng: np.random.Generator,
 ) -> Occluder:
     min_dim = min(width, height)
-    base_radius = float(rng.uniform(0.08, 0.2) * min_dim)
+    base_radius = float(rng.uniform(0.05, 0.8) * min_dim)
     num_vertices = int(rng.integers(7, 13))
 
     angles = np.linspace(0.0, 2.0 * np.pi, num_vertices, endpoint=False)
@@ -211,6 +299,11 @@ def build_random_occluder(
     rel_x = np.cos(angles) * radii
     rel_y = np.sin(angles) * radii
     polygon = np.stack([rel_x, rel_y], axis=1).astype(np.float32)
+    patch_offset, rgb_texture, depth_texture, alpha_texture, mean_color = _build_occluder_textures(
+        polygon,
+        base_radius,
+        rng,
+    )
 
     speed = float(rng.uniform(0.004, 0.012) * min_dim)
     direction = float(rng.uniform(0.0, 2.0 * np.pi))
@@ -220,20 +313,52 @@ def build_random_occluder(
         center=np.array(click_point, dtype=np.float32),
         velocity=velocity,
         relative_polygon=polygon,
-        bgr_color=sample_occluder_color(rng),
+        bgr_color=mean_color,
         base_radius=base_radius,
         spawn_frame=frame_idx,
+        patch_offset=patch_offset,
+        rgb_texture=rgb_texture,
+        depth_texture=depth_texture,
+        alpha_texture=alpha_texture,
     )
 
 
 def apply_occluder(frame: np.ndarray, occluder: Occluder) -> tuple[np.ndarray, np.ndarray]:
     output = frame.copy()
-    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-    polygon = occluder.polygon()
-    cv2.fillPoly(mask, [polygon], 255)
+    height, width = frame.shape[:2]
+    mask = np.zeros((height, width), dtype=np.uint8)
 
-    output[mask > 0, :3] = occluder.bgr_color
-    output[mask > 0, 3] = 0
+    patch_h, patch_w = occluder.alpha_texture.shape
+    top_left = np.round(occluder.center + occluder.patch_offset).astype(np.int32)
+    x0, y0 = int(top_left[0]), int(top_left[1])
+    x1, y1 = x0 + patch_w, y0 + patch_h
+
+    dst_x0 = max(0, x0)
+    dst_y0 = max(0, y0)
+    dst_x1 = min(width, x1)
+    dst_y1 = min(height, y1)
+    if dst_x0 >= dst_x1 or dst_y0 >= dst_y1:
+        return output, mask
+
+    src_x0 = dst_x0 - x0
+    src_y0 = dst_y0 - y0
+    src_x1 = src_x0 + (dst_x1 - dst_x0)
+    src_y1 = src_y0 + (dst_y1 - dst_y0)
+
+    alpha = occluder.alpha_texture[src_y0:src_y1, src_x0:src_x1][..., None]
+    occ_rgb = occluder.rgb_texture[src_y0:src_y1, src_x0:src_x1].astype(np.float32)
+    occ_depth = occluder.depth_texture[src_y0:src_y1, src_x0:src_x1].astype(np.float32)
+
+    roi_rgb = output[dst_y0:dst_y1, dst_x0:dst_x1, :3].astype(np.float32)
+    roi_depth = output[dst_y0:dst_y1, dst_x0:dst_x1, 3].astype(np.float32)
+
+    blended_rgb = occ_rgb * alpha + roi_rgb * (1.0 - alpha)
+    front_depth = np.minimum(roi_depth, occ_depth)
+    blended_depth = front_depth * alpha[..., 0] + roi_depth * (1.0 - alpha[..., 0])
+
+    output[dst_y0:dst_y1, dst_x0:dst_x1, :3] = np.clip(blended_rgb, 0.0, 255.0).astype(np.uint8)
+    output[dst_y0:dst_y1, dst_x0:dst_x1, 3] = np.clip(blended_depth, 0.0, 255.0).astype(np.uint8)
+    mask[dst_y0:dst_y1, dst_x0:dst_x1] = (alpha[..., 0] > 0.05).astype(np.uint8) * 255
     return output, mask
 
 

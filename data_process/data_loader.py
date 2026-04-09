@@ -69,6 +69,15 @@ def _augment_rgb_channels(image):
     return np.concatenate([rgb, depth], axis=2)
 
 
+def _source_group_key(task_path):
+    task_name = os.path.basename(task_path)
+    if task_name.startswith("task_obst_"):
+        return task_name[len("task_obst_") :]
+    if task_name.startswith("task_"):
+        return task_name[len("task_") :]
+    return task_name
+
+
 class ImitationDataset(Dataset):
     def __init__(
         self,
@@ -212,33 +221,68 @@ class ImitationDataset(Dataset):
             task_keys = next_task_keys
         return mixed
 
+    def _balance_obstacle_ratio(self, samples, seed):
+        obst_samples = [sample for sample in samples if sample["obst"]]
+        normal_samples = [sample for sample in samples if not sample["obst"]]
+        if not obst_samples or not normal_samples:
+            return samples
+
+        keep_count = min(len(obst_samples), len(normal_samples))
+        rng = random.Random(seed)
+        rng.shuffle(obst_samples)
+        rng.shuffle(normal_samples)
+        return obst_samples[:keep_count] + normal_samples[:keep_count]
+
     def _split_by_task(self, train_ratio, seed):
         task_to_obst = {}
+        task_to_group = {}
         for sample in self.all_samples:
             task_to_obst[sample["task"]] = bool(sample["obst"])
+            task_to_group[sample["task"]] = _source_group_key(sample["task"])
 
-        obst_tasks = [task for task, is_obst in task_to_obst.items() if is_obst]
-        normal_tasks = [task for task, is_obst in task_to_obst.items() if not is_obst]
+        grouped_tasks = {}
+        for task, group in task_to_group.items():
+            grouped_tasks.setdefault(group, set()).add(task)
 
-        train_obst, val_obst = self._split_grouped_tasks(obst_tasks, train_ratio, seed)
-        train_normal, val_normal = self._split_grouped_tasks(normal_tasks, train_ratio, seed + 1)
-        train_tasks = train_obst | train_normal
-        val_tasks = val_obst | val_normal
+        group_keys = sorted(grouped_tasks)
+        rng = random.Random(seed)
+        rng.shuffle(group_keys)
+        if len(group_keys) <= 1:
+            train_groups, val_groups = set(group_keys), set()
+        else:
+            split_idx = int(len(group_keys) * train_ratio)
+            split_idx = max(1, min(len(group_keys) - 1, split_idx))
+            train_groups = set(group_keys[:split_idx])
+            val_groups = set(group_keys[split_idx:])
+
+        train_tasks = {task for group in train_groups for task in grouped_tasks[group]}
+        val_tasks = {task for group in val_groups for task in grouped_tasks[group]}
 
         if self.mode == "train":
             self.samples = [s for s in self.all_samples if s["task"] in train_tasks]
         else:
             self.samples = [s for s in self.all_samples if s["task"] in val_tasks]
 
+        self.samples = self._balance_obstacle_ratio(
+            self.samples,
+            seed + (0 if self.mode == "train" else 1000),
+        )
         self.samples = self._interleave_samples(self.samples, seed + (0 if self.mode == "train" else 1000))
 
         train_task_count = len(train_tasks)
         val_task_count = len(val_tasks)
-        train_obst_count = len(train_obst)
-        val_obst_count = len(val_obst)
+        train_obst_count = sum(1 for task in train_tasks if task_to_obst[task])
+        val_obst_count = sum(1 for task in val_tasks if task_to_obst[task])
+        train_group_count = len(train_groups)
+        val_group_count = len(val_groups)
+        sample_obst_count = sum(1 for sample in self.samples if sample["obst"])
         print(
             f"Task split | train={train_task_count} (obst={train_obst_count}, normal={train_task_count - train_obst_count}) "
             f"| val={val_task_count} (obst={val_obst_count}, normal={val_task_count - val_obst_count})"
+        )
+        print(
+            f"Source groups | train={train_group_count} | val={val_group_count} | "
+            f"{self.mode} samples obst={sample_obst_count}, normal={len(self.samples) - sample_obst_count}"
         )
 
         print(f"{self.mode.upper()} 集样本数：{len(self.samples)}")

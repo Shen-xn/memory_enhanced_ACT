@@ -8,9 +8,9 @@ from typing import Dict, List
 
 DEFAULT_CLASS_NAMES = ["target", "goal", "arm"]
 DEFAULT_CLASS_WEIGHTS = {
-    "target": 0.6,
+    "target": 0.5,
     "goal": 0.3,
-    "arm": 0.1,
+    "arm": 0.2,
 }
 
 
@@ -67,9 +67,9 @@ class MemoryUpdateConfig:
     # Changing only the defaults here will not modify an old checkpoint automatically.
     # keep_top_ratio means "keep the top keep_top_ratio fraction of pixels by score_state".
     # Example: keep_top_ratio=0.05 keeps the top 5% pixels in each frame.
-    score_decay: float = 0.9
+    score_decay: float = 0.8
     tau_up: float = 0.1
-    keep_top_ratio: float = 0.5
+    keep_top_ratio: float = 0.6
 
 
 @dataclass
@@ -93,7 +93,7 @@ class ImportanceTrainingConfig:
     num_workers: int = 0
     num_epochs: int = 20
     learning_rate: float = 1e-4
-    weight_decay: float = 1e-4
+    weight_decay: float = 3e-4
     train_ratio: float = 0.8
     seed: int = 42
     save_root: str = ""
