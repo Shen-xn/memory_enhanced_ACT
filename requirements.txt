@@ -1,21 +1,34 @@
+# Recommended Python: 3.10 - 3.13
+# Ubuntu 22.04 / ROS 2 Humble usually means Python 3.10.
+#
 # Install PyTorch / torchvision separately first when needed.
-# Example (desktop CUDA):
+# Desktop CUDA example:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-# Example (CPU):
+# CPU example:
 #   pip install torch torchvision
 #
-# On Jetson, prefer NVIDIA/Jetson-compatible PyTorch wheels instead of plain pip wheels.
+# Jetson / aarch64:
+# - Prefer NVIDIA / Jetson-compatible PyTorch wheels
+# - Prefer system OpenCV instead of pip wheels:
+#     sudo apt install python3-opencv
+#
+# After that:
+#   pip install -r requirements.txt
 
-numpy==2.4.3
-opencv-python==4.13.0.0
-pandas==3.0.2
-Pillow==12.1.1
-scipy==1.17.1
-tqdm==4.67.3
-PyYAML==6.0.3
-matplotlib==3.10.7
-einops==0.8.1
-h5py==3.15.1
-seaborn==0.13.2
-packaging==25.0
-ipython==9.7.0
+numpy>=2.0,<2.5
+pandas>=2.2,<3.1
+Pillow>=10,<13
+scipy>=1.13,<1.18
+tqdm>=4.66,<5
+PyYAML>=6.0,<7
+matplotlib>=3.8,<3.11
+einops>=0.8,<0.9
+h5py>=3.10,<3.17
+seaborn>=0.13,<0.14
+packaging>=24,<26
+ipython>=8.18,<10
+
+# OpenCV:
+# - On normal x86_64 Windows/Linux, pip wheel is fine.
+# - On Jetson/aarch64, install python3-opencv via apt instead.
+opencv-python>=4.8,<4.13; platform_machine != "aarch64"

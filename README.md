@@ -36,6 +36,33 @@ python run_me_block_generate_memory_images.py --checkpoint .\log\me_block\import
 python training.py
 ```
 
+## 环境安装
+
+推荐 Python 版本：
+
+- `Python 3.10 - 3.13`
+- Ubuntu 22.04 / ROS 2 Humble 一般对应 `Python 3.10`
+
+先按设备类型安装 `torch` / `torchvision`，再安装项目依赖：
+
+```bash
+pip install -r requirements.txt
+```
+
+`requirements.txt` 里没有强绑 `torch`，是因为桌面 CUDA、CPU 和 Jetson 的安装方式不一样。
+
+如果是 Jetson / `aarch64`：
+
+- 优先安装 Jetson 兼容的 `torch` / `torchvision`
+- `opencv` 不建议走 pip，优先：
+
+```bash
+sudo apt update
+sudo apt install -y python3-opencv
+```
+
+普通 Windows / x86_64 Linux 再使用 `pip install -r requirements.txt` 即可。
+
 ## 目录
 
 - `training.py`：ACT 训练入口
