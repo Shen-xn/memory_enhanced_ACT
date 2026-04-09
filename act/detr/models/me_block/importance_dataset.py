@@ -14,9 +14,15 @@ from .me_block_config import ImportanceModelConfig, ImportanceTrainingConfig
 
 
 def list_task_dirs(data_root: str, image_dirname: str = "four_channel") -> List[str]:
+    candidates = []
+    candidates.extend(sorted(glob.glob(os.path.join(data_root, "task*"))))
+    special_dir = os.path.join(data_root, "special_data")
+    if os.path.isdir(special_dir):
+        candidates.append(special_dir)
+
     return [
         path
-        for path in sorted(glob.glob(os.path.join(data_root, "task*")))
+        for path in candidates
         if os.path.isdir(path)
         and "task_copy" not in path
         and os.path.isdir(os.path.join(path, image_dirname))
@@ -115,13 +121,21 @@ class ImportanceFrameDataset(Dataset):
                 f"No tasks with both `{self.config.image_dirname}` and `{self.config.label_dirname}` were found."
             )
 
+        primary_tasks = [task_dir for task_dir in eligible_tasks if os.path.basename(task_dir).startswith("task")]
+        auxiliary_tasks = [task_dir for task_dir in eligible_tasks if task_dir not in primary_tasks]
+
         rng = random.Random(self.config.seed)
-        rng.shuffle(eligible_tasks)
-        split_index = max(1, int(len(eligible_tasks) * self.config.train_ratio))
-        train_tasks = set(eligible_tasks[:split_index])
-        selected = train_tasks if self.split == "train" else set(eligible_tasks) - train_tasks
+        rng.shuffle(primary_tasks)
+        split_index = max(1, int(len(primary_tasks) * self.config.train_ratio)) if primary_tasks else 0
+        train_tasks = set(primary_tasks[:split_index])
+        val_tasks = set(primary_tasks[split_index:])
+
+        if self.split == "train":
+            selected = train_tasks | set(auxiliary_tasks)
+        else:
+            selected = val_tasks
         if not selected:
-            selected = train_tasks
+            selected = train_tasks | set(auxiliary_tasks)
 
         samples = []
         for task_dir in eligible_tasks:

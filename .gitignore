@@ -11,6 +11,7 @@ log
 data_local
 .vscode
 _wandb
+run_me_block_prepare_special_data.py
 
 **/.DS_Store
 
