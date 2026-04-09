@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .me_block_config import MEBlockConfig, default_me_block_config, save_config
-from .importance_dataset import ImportanceFrameDataset, read_label
+from .importance_dataset import ImportanceFrameDataset
 from .memory_gate_model import ImportanceMemoryModel, checkpoint_payload
 
 
@@ -84,19 +84,41 @@ def compute_mean_iou(logits: torch.Tensor, targets: torch.Tensor, num_classes: i
     return float(sum(ious) / len(ious)) if ious else 0.0
 
 
+def accumulate_foreground_recall_counts(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    num_foreground_classes: int,
+    unlabeled_index: int,
+) -> tuple[list[int], list[int]]:
+    preds = logits.argmax(dim=1)
+    true_positive = []
+    ground_truth = []
+    for class_index in range(1, num_foreground_classes + 1):
+        valid_gt = targets == class_index
+        tp = ((preds == class_index) & valid_gt).sum().item()
+        gt = valid_gt.sum().item()
+        true_positive.append(int(tp))
+        ground_truth.append(int(gt))
+    return true_positive, ground_truth
+
+
 def run_epoch(
     model: ImportanceMemoryModel,
     loader: DataLoader,
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer | None,
     device: torch.device,
+    class_names: list[str],
 ) -> dict:
     is_train = optimizer is not None
     model.train(is_train)
+    stage_name = "train" if is_train else "val"
     losses = []
     ious = []
+    tp_counts = [0 for _ in class_names]
+    gt_counts = [0 for _ in class_names]
 
-    progress = tqdm(loader, leave=False)
+    progress = tqdm(loader, leave=False, desc=stage_name)
     for images, labels in progress:
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
@@ -118,11 +140,25 @@ def run_epoch(
                 model.config.importance.unlabeled_index,
             )
         )
+        batch_tp, batch_gt = accumulate_foreground_recall_counts(
+            logits.detach(),
+            labels,
+            model.config.importance.num_foreground_classes,
+            model.config.importance.unlabeled_index,
+        )
+        tp_counts = [a + b for a, b in zip(tp_counts, batch_tp)]
+        gt_counts = [a + b for a, b in zip(gt_counts, batch_gt)]
         progress.set_postfix(loss=f"{losses[-1]:.4f}", miou=f"{ious[-1]:.4f}")
+
+    per_class = {}
+    for name, tp, gt in zip(class_names, tp_counts, gt_counts):
+        recall = float(tp / gt) if gt > 0 else 0.0
+        per_class[name] = {"tp": int(tp), "gt": int(gt), "recall": recall}
 
     return {
         "loss": float(sum(losses) / max(len(losses), 1)),
         "miou": float(sum(ious) / max(len(ious), 1)),
+        "per_class": per_class,
     }
 
 
@@ -137,17 +173,24 @@ def append_metrics(log_path: str, epoch: int, stage: str, metrics: dict) -> None
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def compute_class_weights(train_dataset: ImportanceFrameDataset) -> torch.Tensor:
-    num_classes = train_dataset.model_config.num_output_classes
-    unlabeled_index = train_dataset.model_config.unlabeled_index
+def format_per_class_metrics(metrics: dict) -> str:
+    per_class = metrics.get("per_class", {})
+    parts = []
+    for name, values in per_class.items():
+        parts.append(f"{name}:{values['tp']}/{values['gt']}({values['recall']:.3f})")
+    return " ".join(parts)
+
+
+def compute_class_weights(train_loader: DataLoader, num_classes: int, unlabeled_index: int) -> torch.Tensor:
     class_counts = np.zeros(num_classes, dtype=np.float64)
 
-    for sample in train_dataset.samples:
-        label = read_label(sample["label_path"])
-        valid = label != unlabeled_index
-        if not np.any(valid):
+    for _images, labels in train_loader:
+        labels = labels.numpy()
+        valid = labels != unlabeled_index
+        valid_labels = labels[valid]
+        if valid_labels.size == 0:
             continue
-        bincount = np.bincount(label[valid].reshape(-1), minlength=num_classes)
+        bincount = np.bincount(valid_labels.reshape(-1), minlength=num_classes)
         class_counts += bincount[:num_classes]
 
     class_counts = np.maximum(class_counts, 1.0)
@@ -190,7 +233,11 @@ def main(default_data_root: str = "", default_save_root: str = "") -> None:
     )
 
     model = ImportanceMemoryModel(config=config).to(device)
-    class_weights = compute_class_weights(train_dataset).to(device)
+    class_weights = compute_class_weights(
+        train_loader,
+        config.importance.num_output_classes,
+        config.importance.unlabeled_index,
+    ).to(device)
     print(f"Class weights: {class_weights.detach().cpu().tolist()}")
     with open(os.path.join(save_dir, "class_weights.json"), "w", encoding="utf-8") as f:
         json.dump(
@@ -220,13 +267,13 @@ def main(default_data_root: str = "", default_save_root: str = "") -> None:
 
     for epoch in range(1, config.training.num_epochs + 1):
         print(f"Epoch {epoch}/{config.training.num_epochs}")
-        train_metrics = run_epoch(model, train_loader, criterion, optimizer, device)
-        val_metrics = run_epoch(model, val_loader, criterion, None, device)
+        train_metrics = run_epoch(model, train_loader, criterion, optimizer, device, config.importance.class_names)
+        val_metrics = run_epoch(model, val_loader, criterion, None, device, config.importance.class_names)
 
-        print(
-            f"  train loss={train_metrics['loss']:.4f} miou={train_metrics['miou']:.4f} | "
-            f"val loss={val_metrics['loss']:.4f} miou={val_metrics['miou']:.4f}"
-        )
+        print(f"  train loss={train_metrics['loss']:.4f} miou={train_metrics['miou']:.4f}")
+        print(f"  val   loss={val_metrics['loss']:.4f} miou={val_metrics['miou']:.4f}")
+        print(f"  train recall {format_per_class_metrics(train_metrics)}")
+        print(f"  val   recall {format_per_class_metrics(val_metrics)}")
 
         append_metrics(metrics_path, epoch, "train", train_metrics)
         append_metrics(metrics_path, epoch, "val", val_metrics)

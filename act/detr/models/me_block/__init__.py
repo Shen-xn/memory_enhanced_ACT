@@ -4,7 +4,6 @@ from .memory_gate_model import (
     ImportanceSegmentationModel,
     MemoryImageUpdater,
     build_importance_memory_model,
-    build_me_block,
 )
 
 __all__ = [
@@ -14,5 +13,4 @@ __all__ = [
     "MemoryImageUpdater",
     "ImportanceMemoryModel",
     "build_importance_memory_model",
-    "build_me_block",
 ]

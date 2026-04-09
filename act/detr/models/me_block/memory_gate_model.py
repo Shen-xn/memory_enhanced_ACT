@@ -9,13 +9,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import (
-    MobileNet_V3_Large_Weights,
-    MobileNet_V3_Small_Weights,
     ResNet18_Weights,
-    mobilenet_v3_small,
     resnet18,
 )
-from torchvision.models.segmentation import lraspp_mobilenet_v3_large
 
 from .me_block_config import ImportanceModelConfig, MEBlockConfig, MemoryUpdateConfig, default_me_block_config
 
@@ -67,11 +63,6 @@ def _adapt_conv_to_input_channels(old_conv: nn.Conv2d, input_channels: int) -> n
     return new_conv
 
 
-def _adapt_first_conv_to_input_channels(model: nn.Module, input_channels: int) -> None:
-    first_block = model.backbone["0"]
-    first_block[0] = _adapt_conv_to_input_channels(first_block[0], input_channels)
-
-
 def _resolve_weights(weight_enum, pretrained_backbone: bool, name: str):
     if not pretrained_backbone:
         return None
@@ -92,139 +83,9 @@ def _load_backbone(builder, weights, name: str):
         return builder(weights=None)
 
 
-class LiteMobileNetV3SmallSegmentation(nn.Module):
+class TruncatedResNet18Layer2Segmentation(nn.Module):
     def __init__(self, config: ImportanceModelConfig):
         super().__init__()
-        weights = _resolve_weights(MobileNet_V3_Small_Weights, config.pretrained_backbone, "MobileNetV3-Small")
-        try:
-            backbone = _load_backbone(mobilenet_v3_small, weights, "MobileNetV3-Small")
-        except TypeError:
-            backbone = mobilenet_v3_small(weights=None)
-
-        backbone.features[0][0] = _adapt_conv_to_input_channels(
-            backbone.features[0][0],
-            config.segmentation_input_channels,
-        )
-        self.backbone = backbone.features
-        self.classifier = nn.Sequential(
-            nn.Conv2d(576, 128, kernel_size=1, bias=False),
-            nn.BatchNorm2d(128),
-            nn.Hardswish(inplace=True),
-            nn.Conv2d(128, config.num_output_classes, kernel_size=1),
-        )
-
-    def forward(self, images: torch.Tensor, config: ImportanceModelConfig) -> torch.Tensor:
-        normalized = normalize_image_channels(images, config)
-        features = self.backbone(normalized)
-        logits = self.classifier(features)
-        return F.interpolate(logits, size=images.shape[-2:], mode="bilinear", align_corners=False)
-
-
-class DepthwiseSeparableBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
-        super().__init__()
-        self.use_residual = stride == 1 and in_channels == out_channels
-        self.block = nn.Sequential(
-            nn.Conv2d(
-                in_channels,
-                in_channels,
-                kernel_size=3,
-                stride=stride,
-                padding=1,
-                groups=in_channels,
-                bias=False,
-            ),
-            nn.BatchNorm2d(in_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.block(x)
-        if self.use_residual:
-            out = out + x
-        return out
-
-
-class UltraLiteSegmentationNet(nn.Module):
-    def __init__(self, config: ImportanceModelConfig):
-        super().__init__()
-        if config.pretrained_backbone:
-            warnings.warn(
-                "Pretrained backbone is not available for ultralite_custom_v1. Using random initialization."
-            )
-
-        self.stem = nn.Sequential(
-            nn.Conv2d(config.segmentation_input_channels, 16, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(16),
-            nn.ReLU(inplace=True),
-        )
-        self.stage1 = nn.Sequential(
-            DepthwiseSeparableBlock(16, 24, stride=2),
-            DepthwiseSeparableBlock(24, 24, stride=1),
-        )
-        self.stage2 = nn.Sequential(
-            DepthwiseSeparableBlock(24, 32, stride=2),
-            DepthwiseSeparableBlock(32, 32, stride=1),
-        )
-        self.stage3 = nn.Sequential(
-            DepthwiseSeparableBlock(32, 48, stride=2),
-            DepthwiseSeparableBlock(48, 48, stride=1),
-        )
-        self.context = nn.Sequential(
-            nn.Conv2d(48, 64, kernel_size=1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-        )
-        self.reduce2 = nn.Sequential(
-            nn.Conv2d(64, 32, kernel_size=1, bias=False),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-        )
-        self.lateral2 = nn.Sequential(
-            nn.Conv2d(32, 32, kernel_size=1, bias=False),
-            nn.BatchNorm2d(32),
-        )
-        self.lateral1 = nn.Sequential(
-            nn.Conv2d(24, 24, kernel_size=1, bias=False),
-            nn.BatchNorm2d(24),
-        )
-        self.refine2 = DepthwiseSeparableBlock(32, 32, stride=1)
-        self.reduce1 = nn.Sequential(
-            nn.Conv2d(32, 24, kernel_size=1, bias=False),
-            nn.BatchNorm2d(24),
-            nn.ReLU(inplace=True),
-        )
-        self.refine1 = DepthwiseSeparableBlock(24, 24, stride=1)
-        self.classifier = nn.Conv2d(24, config.num_output_classes, kernel_size=1)
-
-    def forward(self, images: torch.Tensor, config: ImportanceModelConfig) -> torch.Tensor:
-        normalized = normalize_image_channels(images, config)
-        x = self.stem(normalized)
-        feat_4 = self.stage1(x)
-        feat_8 = self.stage2(feat_4)
-        feat_16 = self.stage3(feat_8)
-
-        context = self.context(feat_16)
-        up_8 = F.interpolate(context, size=feat_8.shape[-2:], mode="bilinear", align_corners=False)
-        up_8 = self.reduce2(up_8) + self.lateral2(feat_8)
-        up_8 = self.refine2(up_8)
-
-        up_4 = F.interpolate(up_8, size=feat_4.shape[-2:], mode="bilinear", align_corners=False)
-        up_4 = self.reduce1(up_4) + self.lateral1(feat_4)
-        up_4 = self.refine1(up_4)
-
-        logits = self.classifier(up_4)
-        return F.interpolate(logits, size=images.shape[-2:], mode="bilinear", align_corners=False)
-
-
-class TruncatedResNet18Segmentation(nn.Module):
-    def __init__(self, config: ImportanceModelConfig, stop_stage: str):
-        super().__init__()
-        if stop_stage not in {"layer1", "layer2", "layer3"}:
-            raise ValueError(f"Unsupported ResNet18 truncation stage: {stop_stage}")
         weights = _resolve_weights(ResNet18_Weights, config.pretrained_backbone, "ResNet18")
         backbone = _load_backbone(resnet18, weights, "ResNet18")
 
@@ -235,16 +96,8 @@ class TruncatedResNet18Segmentation(nn.Module):
         self.stem = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool)
         self.layer1 = backbone.layer1
         self.layer2 = backbone.layer2
-        self.layer3 = backbone.layer3
-        self.stop_stage = stop_stage
-
-        out_channels = {
-            "layer1": 64,
-            "layer2": 128,
-            "layer3": 256,
-        }[stop_stage]
         self.head = nn.Sequential(
-            nn.Conv2d(out_channels, 64, kernel_size=1, bias=False),
+            nn.Conv2d(128, 64, kernel_size=1, bias=False),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.Conv2d(64, config.num_output_classes, kernel_size=1),
@@ -254,11 +107,7 @@ class TruncatedResNet18Segmentation(nn.Module):
         normalized = normalize_image_channels(images, config)
         features = self.stem(normalized)
         features = self.layer1(features)
-        if self.stop_stage in {"layer2", "layer3"}:
-            features = self.layer2(features)
-        if self.stop_stage == "layer3":
-            features = self.layer3(features)
-
+        features = self.layer2(features)
         logits = self.head(features)
         return F.interpolate(logits, size=images.shape[-2:], mode="bilinear", align_corners=False)
 
@@ -267,34 +116,15 @@ class ImportanceSegmentationModel(nn.Module):
     def __init__(self, config: ImportanceModelConfig):
         super().__init__()
         self.config = config
-        self.model_name = config.model_name
-
-        if self.model_name == "lraspp_mobilenet_v3_large":
-            backbone_weights = MobileNet_V3_Large_Weights.DEFAULT if config.pretrained_backbone else None
-            self.model = lraspp_mobilenet_v3_large(
-                weights=None,
-                weights_backbone=backbone_weights,
-                num_classes=config.num_output_classes,
+        if config.model_name != "truncated_resnet18_layer2":
+            raise ValueError(
+                f"Unsupported importance model: {config.model_name}. "
+                "Current code only keeps truncated_resnet18_layer2."
             )
-            _adapt_first_conv_to_input_channels(self.model, config.segmentation_input_channels)
-        elif self.model_name == "lite_mobilenet_v3_small":
-            self.model = LiteMobileNetV3SmallSegmentation(config)
-        elif self.model_name == "truncated_resnet18_layer1":
-            self.model = TruncatedResNet18Segmentation(config, stop_stage="layer1")
-        elif self.model_name == "truncated_resnet18_layer2":
-            self.model = TruncatedResNet18Segmentation(config, stop_stage="layer2")
-        elif self.model_name == "truncated_resnet18_layer3":
-            self.model = TruncatedResNet18Segmentation(config, stop_stage="layer3")
-        elif self.model_name == "ultralite_custom_v1":
-            self.model = UltraLiteSegmentationNet(config)
-        else:
-            raise ValueError(f"Unsupported importance model: {self.model_name}")
+        self.model = TruncatedResNet18Layer2Segmentation(config)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         segmentation_images = select_segmentation_input(images, self.config)
-        if self.model_name == "lraspp_mobilenet_v3_large":
-            normalized = normalize_image_channels(segmentation_images, self.config)
-            return self.model(normalized)["out"]
         return self.model(segmentation_images, self.config)
 
 
@@ -334,7 +164,10 @@ class MemoryImageUpdater(nn.Module):
             keepdim=True,
         )
         if background_prob is not None:
-            importance_score = importance_score * (1.0 - background_prob.to(class_probs.dtype))
+            all_probs = torch.cat([background_prob.to(class_probs.dtype), class_probs], dim=1)
+            max_prob_class = torch.argmax(all_probs, dim=1, keepdim=True)
+            foreground_mask = (max_prob_class != 0).to(class_probs.dtype)
+            importance_score = importance_score * foreground_mask
         return importance_score
 
     def _top_fraction_mask(self, scores: torch.Tensor) -> torch.Tensor:
@@ -429,25 +262,8 @@ class ImportanceMemoryModel(nn.Module):
         )
 
 
-class MemoryImageIdentity(nn.Module):
-    """
-    Compatibility stub for the current ACT training path.
-
-    We do not use an online me_block in the main training loop right now.
-    The recommended path is to precompute `memory_image_four_channel` offline
-    and feed it directly into ACT as an additional visual input.
-    """
-
-    def forward(self, memory_image: torch.Tensor, _current_image: torch.Tensor) -> torch.Tensor:
-        return memory_image
-
-
 def build_importance_memory_model(config: Optional[MEBlockConfig] = None) -> ImportanceMemoryModel:
     return ImportanceMemoryModel(config=config)
-
-
-def build_me_block(*_args, **_kwargs) -> nn.Module:
-    return MemoryImageIdentity()
 
 
 def checkpoint_payload(model: ImportanceMemoryModel) -> Dict:

@@ -219,7 +219,7 @@ def _build_occluder_textures(
     base_radius: float,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    soft_edge = max(10, int(base_radius * 0.12))
+    soft_edge = max(2, int(base_radius * 0.035))
     min_xy = np.floor(polygon.min(axis=0)).astype(np.int32) - soft_edge * 2
     max_xy = np.ceil(polygon.max(axis=0)).astype(np.int32) + soft_edge * 2
     size = np.maximum(max_xy - min_xy + 1, 1)
@@ -229,9 +229,9 @@ def _build_occluder_textures(
     mask = np.zeros((patch_h, patch_w), dtype=np.uint8)
     cv2.fillPoly(mask, [local_polygon], 255)
 
-    alpha = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), sigmaX=soft_edge * 0.45, sigmaY=soft_edge * 0.45)
+    alpha = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), sigmaX=max(0.8, soft_edge * 0.55), sigmaY=max(0.8, soft_edge * 0.55))
     alpha = np.clip(alpha, 0.0, 1.0)
-    alpha[mask > 0] = np.maximum(alpha[mask > 0], 0.7)
+    alpha[mask > 0] = np.maximum(alpha[mask > 0], 0.92)
 
     yy, xx = np.mgrid[0:patch_h, 0:patch_w].astype(np.float32)
     center_x = (patch_w - 1) * 0.5
@@ -247,33 +247,26 @@ def _build_occluder_textures(
     noise_large = _low_frequency_noise(rng, patch_h, patch_w, 5, 5)
     noise_small = _low_frequency_noise(rng, patch_h, patch_w, 10, 10)
 
-    hue_raw = float(rng.integers(0, 256))
-    hue = np.full((patch_h, patch_w), hue_raw * 179.0 / 255.0, dtype=np.float32)
-    hue += noise_large * 6.0 + noise_small * 2.0
-    hue = np.mod(hue, 180.0)
+    palette = np.array(
+        [
+            [60, 60, 60],
+            [85, 80, 72],
+            [92, 88, 84],
+            [70, 78, 92],
+            [56, 68, 74],
+            [96, 92, 78],
+        ],
+        dtype=np.float32,
+    )
+    base_color = palette[int(rng.integers(0, len(palette)))]
+    shading = 0.88 + directional[..., None] * 0.18 - radial[..., None] * 0.08
+    texture_noise = noise_large[..., None] * 7.0 + noise_small[..., None] * 3.0
+    rgb_texture = np.clip(base_color[None, None, :] * shading + texture_noise, 28.0, 185.0).astype(np.uint8)
 
-    sat_base = float(rng.integers(30, 201))
-    val_base = float(rng.integers(50, 201))
-    sat = sat_base + noise_large * 18.0 - radial * 20.0
-    val = val_base + directional * 35.0 + noise_small * 16.0 - radial * 28.0
-    sat = np.clip(sat, 30.0, 200.0)
-    val = np.clip(val, 50.0, 200.0)
-
-    hsv = np.stack([hue, sat, val], axis=-1).astype(np.uint8)
-    rgb_texture = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
-
-    edge_glow = cv2.GaussianBlur(alpha, (0, 0), sigmaX=max(1.0, soft_edge * 0.8), sigmaY=max(1.0, soft_edge * 0.8))
-    edge_glow = np.clip(edge_glow - alpha * 0.7, 0.0, 1.0)
-    rgb_texture = np.clip(
-        rgb_texture.astype(np.float32) * (0.85 + 0.25 * directional[..., None]) + edge_glow[..., None] * 20.0,
-        0.0,
-        255.0,
-    ).astype(np.uint8)
-
-    depth_base = float(rng.uniform(0.0, 28.0))
-    depth_bump = (1.0 - radial) * rng.uniform(18.0, 42.0)
-    depth_noise = noise_large * 5.0 + noise_small * 2.0
-    depth_texture = np.clip(depth_base + depth_bump + depth_noise, 0.0, 64.0).astype(np.uint8)
+    depth_base = float(rng.uniform(6.0, 32.0))
+    depth_slope = directional * rng.uniform(-4.0, 4.0)
+    depth_noise = noise_large * 1.6 + noise_small * 0.8
+    depth_texture = np.clip(depth_base + depth_slope + depth_noise, 1.0, 80.0).astype(np.uint8)
 
     mean_alpha = max(alpha.sum(), 1e-6)
     mean_color = (rgb_texture.astype(np.float32) * alpha[..., None]).sum(axis=(0, 1)) / mean_alpha
@@ -323,7 +316,7 @@ def build_random_occluder(
     )
 
 
-def apply_occluder(frame: np.ndarray, occluder: Occluder) -> tuple[np.ndarray, np.ndarray]:
+def apply_occluder(frame: np.ndarray, occluder: Occluder, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
     output = frame.copy()
     height, width = frame.shape[:2]
     mask = np.zeros((height, width), dtype=np.uint8)
@@ -353,12 +346,37 @@ def apply_occluder(frame: np.ndarray, occluder: Occluder) -> tuple[np.ndarray, n
     roi_depth = output[dst_y0:dst_y1, dst_x0:dst_x1, 3].astype(np.float32)
 
     blended_rgb = occ_rgb * alpha + roi_rgb * (1.0 - alpha)
-    front_depth = np.minimum(roi_depth, occ_depth)
-    blended_depth = front_depth * alpha[..., 0] + roi_depth * (1.0 - alpha[..., 0])
+    hard_mask = (alpha[..., 0] > 0.35).astype(np.uint8)
+    blended_depth = roi_depth.copy()
+    blended_depth[hard_mask > 0] = occ_depth[hard_mask > 0]
+
+    # Simulate a shallow boundary band with missing / jittered depth, but still cover the original depth.
+    edge_radius = 5
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (edge_radius * 2 + 1, edge_radius * 2 + 1))
+    dilated = cv2.dilate(hard_mask, kernel)
+    eroded = cv2.erode(hard_mask, kernel)
+    outer_band = (dilated > 0) & (hard_mask == 0)
+    inner_band = (hard_mask > 0) & (eroded == 0)
+
+    if np.any(outer_band):
+        missing_prob = 0.55
+        outer_missing = rng.random(outer_band.shape) < missing_prob
+        blended_depth[outer_band & outer_missing] = 0.0
+        outer_jitter = rng.normal(loc=4.0, scale=2.0, size=outer_band.shape).astype(np.float32)
+        outer_values = np.clip(occ_depth + outer_jitter, 0.0, 255.0)
+        blended_depth[outer_band & ~outer_missing] = outer_values[outer_band & ~outer_missing]
+
+    if np.any(inner_band):
+        inner_missing = rng.random(inner_band.shape) < 0.18
+        blended_depth[inner_band & inner_missing] = 0.0
+        inner_jitter = rng.normal(loc=0.0, scale=2.0, size=inner_band.shape).astype(np.float32)
+        inner_values = np.clip(occ_depth + inner_jitter, 0.0, 255.0)
+        blended_depth[inner_band & ~inner_missing] = inner_values[inner_band & ~inner_missing]
 
     output[dst_y0:dst_y1, dst_x0:dst_x1, :3] = np.clip(blended_rgb, 0.0, 255.0).astype(np.uint8)
     output[dst_y0:dst_y1, dst_x0:dst_x1, 3] = np.clip(blended_depth, 0.0, 255.0).astype(np.uint8)
-    mask[dst_y0:dst_y1, dst_x0:dst_x1] = (alpha[..., 0] > 0.05).astype(np.uint8) * 255
+    visible_mask = ((dilated > 0) | (hard_mask > 0)).astype(np.uint8) * 255
+    mask[dst_y0:dst_y1, dst_x0:dst_x1] = visible_mask
     return output, mask
 
 
@@ -439,7 +457,7 @@ def process_task(
                 }
 
         if occluder is not None:
-            output_frame, mask = apply_occluder(frame, occluder)
+            output_frame, mask = apply_occluder(frame, occluder, rng)
         else:
             output_frame = frame.copy()
             mask = np.zeros(frame.shape[:2], dtype=np.uint8)
