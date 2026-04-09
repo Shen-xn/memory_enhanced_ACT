@@ -13,7 +13,36 @@ from torch.utils.data import Dataset
 from .me_block_config import ImportanceModelConfig, ImportanceTrainingConfig
 
 
-def list_task_dirs(data_root: str, image_dirname: str = "four_channel") -> List[str]:
+SPECIAL_TASK_NAME = "special_data"
+
+
+def resolve_task_image_dir(task_dir: str, image_dirname: str = "auto") -> str:
+    task_name = os.path.basename(os.path.normpath(task_dir))
+    four_channel_dir = os.path.join(task_dir, "four_channel")
+    rgb_dir = os.path.join(task_dir, "rgb")
+
+    if image_dirname == "auto":
+        if task_name == SPECIAL_TASK_NAME and os.path.isdir(rgb_dir):
+            return "rgb"
+        if os.path.isdir(four_channel_dir):
+            return "four_channel"
+        if os.path.isdir(rgb_dir):
+            return "rgb"
+        return ""
+
+    if image_dirname == "four_channel":
+        if os.path.isdir(four_channel_dir):
+            return "four_channel"
+        if task_name == SPECIAL_TASK_NAME and os.path.isdir(rgb_dir):
+            return "rgb"
+        return ""
+
+    if image_dirname == "rgb" and os.path.isdir(rgb_dir):
+        return "rgb"
+    return ""
+
+
+def list_task_dirs(data_root: str, image_dirname: str = "auto") -> List[str]:
     candidates = []
     candidates.extend(sorted(glob.glob(os.path.join(data_root, "task*"))))
     special_dir = os.path.join(data_root, "special_data")
@@ -25,7 +54,7 @@ def list_task_dirs(data_root: str, image_dirname: str = "four_channel") -> List[
         for path in candidates
         if os.path.isdir(path)
         and "task_copy" not in path
-        and os.path.isdir(os.path.join(path, image_dirname))
+        and resolve_task_image_dir(path, image_dirname)
     ]
 
 
@@ -50,6 +79,24 @@ def read_rgb_image(path: str) -> np.ndarray:
     if image.ndim != 3 or image.shape[2] != 3:
         raise RuntimeError(f"Expected a 3-channel image, got shape {image.shape} from {path}")
     return image
+
+
+def read_model_input(path: str, image_dirname: str, input_channels: int) -> np.ndarray:
+    if image_dirname == "four_channel":
+        image = read_four_channel(path)
+    else:
+        image = read_rgb_image(path)
+
+    if image.shape[2] == input_channels:
+        return image
+    if image.shape[2] > input_channels:
+        return image[:, :, :input_channels]
+    if image.shape[2] == 3 and input_channels == 4:
+        depth = np.zeros((image.shape[0], image.shape[1], 1), dtype=image.dtype)
+        return np.concatenate([image, depth], axis=2)
+    raise RuntimeError(
+        f"Cannot adapt image with {image.shape[2]} channels to {input_channels} channels for {path}."
+    )
 
 
 def read_label(path: str) -> np.ndarray:
@@ -101,8 +148,11 @@ class ImportanceFrameDataset(Dataset):
         eligible_tasks: List[str] = []
         task_matches: Dict[str, List[Tuple[str, str]]] = {}
         for task_dir in task_dirs:
+            resolved_image_dirname = resolve_task_image_dir(task_dir, self.config.image_dirname)
+            if not resolved_image_dirname:
+                continue
             label_dir = os.path.join(task_dir, self.config.label_dirname)
-            image_dir = os.path.join(task_dir, self.config.image_dirname)
+            image_dir = os.path.join(task_dir, resolved_image_dirname)
             if not os.path.isdir(label_dir):
                 continue
             if not os.path.isdir(image_dir):
@@ -114,11 +164,14 @@ class ImportanceFrameDataset(Dataset):
             shared_names = sorted(set(image_map.keys()) & set(label_map.keys()))
             if shared_names:
                 eligible_tasks.append(task_dir)
-                task_matches[task_dir] = [(image_map[name], label_map[name]) for name in shared_names]
+                task_matches[task_dir] = [
+                    (image_map[name], label_map[name], resolved_image_dirname)
+                    for name in shared_names
+                ]
 
         if not eligible_tasks:
             raise FileNotFoundError(
-                f"No tasks with both `{self.config.image_dirname}` and `{self.config.label_dirname}` were found."
+                f"No tasks with both image inputs and `{self.config.label_dirname}` were found."
             )
 
         primary_tasks = [task_dir for task_dir in eligible_tasks if os.path.basename(task_dir).startswith("task")]
@@ -141,12 +194,13 @@ class ImportanceFrameDataset(Dataset):
         for task_dir in eligible_tasks:
             if task_dir not in selected:
                 continue
-            for image_path, label_path in task_matches[task_dir]:
+            for image_path, label_path, image_dirname in task_matches[task_dir]:
                 samples.append(
                     {
                         "task": os.path.basename(task_dir),
                         "image_path": image_path,
                         "label_path": label_path,
+                        "image_dirname": image_dirname,
                     }
                 )
 
@@ -157,8 +211,11 @@ class ImportanceFrameDataset(Dataset):
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
         sample = self.samples[index]
-        reader = read_rgb_image if self.config.image_dirname == "rgb" else read_four_channel
-        image = reader(sample["image_path"]).astype(np.float32) / 255.0
+        image = read_model_input(
+            sample["image_path"],
+            sample["image_dirname"],
+            self.model_config.input_channels,
+        ).astype(np.float32) / 255.0
         if self.split == "train":
             image = augment_image(image, self.config)
         label = read_label(sample["label_path"])

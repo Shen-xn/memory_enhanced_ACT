@@ -78,7 +78,7 @@ class ImportanceTrainingConfig:
     # Changing them does not modify an existing checkpoint.
     # If you want the new settings to take effect, train again.
     data_root: str = ""
-    image_dirname: str = "rgb"
+    image_dirname: str = "auto"
     label_dirname: str = "importance_labels"
     use_augmentation: bool = True
     gamma_min: float = 0.6

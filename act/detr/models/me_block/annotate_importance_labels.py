@@ -10,7 +10,7 @@ from typing import Dict, List
 import cv2
 import numpy as np
 
-from .importance_dataset import list_image_files, list_task_dirs, read_four_channel, read_rgb_image
+from .importance_dataset import list_image_files, list_task_dirs, read_four_channel, read_rgb_image, resolve_task_image_dir
 from .me_block_config import default_me_block_config
 
 WINDOW_NAME = "Importance Label Annotator"
@@ -28,6 +28,7 @@ HELP_LINES = [
 class TaskRecord:
     task_dir: str
     name: str
+    image_dirname: str
     frame_paths: List[str]
     label_dir: str
     labeled_count: int
@@ -36,7 +37,12 @@ class TaskRecord:
 def parse_args(default_data_root: str = "", default_label_dirname: str = "importance_labels") -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Interactive labeling tool for me_block importance masks.")
     parser.add_argument("--data-root", type=str, default=default_data_root, help="Root containing task* folders.")
-    parser.add_argument("--image-dirname", type=str, default="rgb", help="Per-task image directory used for annotation.")
+    parser.add_argument(
+        "--image-dirname",
+        type=str,
+        default="auto",
+        help="Per-task image directory used for annotation. Default uses four_channel, with special_data falling back to rgb.",
+    )
     parser.add_argument(
         "--label-dirname",
         type=str,
@@ -176,8 +182,11 @@ class ImportanceLabelAnnotator:
                 continue
             if self.args.task_filter and self.args.task_filter not in name:
                 continue
+            image_dirname = resolve_task_image_dir(task_dir, self.args.image_dirname)
+            if not image_dirname:
+                continue
 
-            frame_paths = list_image_files(os.path.join(task_dir, self.args.image_dirname))
+            frame_paths = list_image_files(os.path.join(task_dir, image_dirname))
             if not frame_paths:
                 continue
 
@@ -190,6 +199,7 @@ class ImportanceLabelAnnotator:
                 TaskRecord(
                     task_dir=task_dir,
                     name=name,
+                    image_dirname=image_dirname,
                     frame_paths=frame_paths,
                     label_dir=label_dir,
                     labeled_count=labeled_count,
@@ -198,7 +208,7 @@ class ImportanceLabelAnnotator:
         return tasks
 
     def _read_display_image(self, frame_path: str) -> np.ndarray:
-        if self.args.image_dirname == "rgb":
+        if self._current_task().image_dirname == "rgb":
             return read_rgb_image(frame_path)
         image = read_four_channel(frame_path)
         return image[:, :, :3].copy()

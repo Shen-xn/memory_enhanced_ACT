@@ -84,6 +84,7 @@ class ImitationDataset(Dataset):
         self.normalize_joints = normalize_joints
         self.strict_alignment = strict_alignment
         self.joint_min_max = joint_min_max
+        self.seed = seed
         
         self.all_samples = self._load_all_samples()
         self._split_by_task(train_ratio, seed)
@@ -171,16 +172,69 @@ class ImitationDataset(Dataset):
         print(f"总有效样本数：{len(samples)}")
         return samples
 
+    def _split_grouped_tasks(self, task_paths, train_ratio, seed):
+        task_paths = sorted(task_paths)
+        if len(task_paths) <= 1:
+            return set(task_paths), set()
+
+        shuffled = task_paths[:]
+        random.Random(seed).shuffle(shuffled)
+        split_idx = int(len(shuffled) * train_ratio)
+        split_idx = max(1, min(len(shuffled) - 1, split_idx))
+        return set(shuffled[:split_idx]), set(shuffled[split_idx:])
+
+    def _interleave_samples(self, samples, seed):
+        grouped = {}
+        for sample in samples:
+            grouped.setdefault(sample["task"], []).append(sample)
+
+        rng = random.Random(seed)
+        task_keys = list(grouped.keys())
+        rng.shuffle(task_keys)
+        for task in task_keys:
+            rng.shuffle(grouped[task])
+
+        mixed = []
+        while task_keys:
+            next_task_keys = []
+            for task in task_keys:
+                task_samples = grouped[task]
+                if task_samples:
+                    mixed.append(task_samples.pop())
+                if task_samples:
+                    next_task_keys.append(task)
+            rng.shuffle(next_task_keys)
+            task_keys = next_task_keys
+        return mixed
+
     def _split_by_task(self, train_ratio, seed):
-        task_set = sorted(list({s["task"] for s in self.all_samples}))
-        random.Random(seed).shuffle(task_set)
-        split_idx = int(len(task_set) * train_ratio)
-        train_tasks = set(task_set[:split_idx])
+        task_to_obst = {}
+        for sample in self.all_samples:
+            task_to_obst[sample["task"]] = bool(sample["obst"])
+
+        obst_tasks = [task for task, is_obst in task_to_obst.items() if is_obst]
+        normal_tasks = [task for task, is_obst in task_to_obst.items() if not is_obst]
+
+        train_obst, val_obst = self._split_grouped_tasks(obst_tasks, train_ratio, seed)
+        train_normal, val_normal = self._split_grouped_tasks(normal_tasks, train_ratio, seed + 1)
+        train_tasks = train_obst | train_normal
+        val_tasks = val_obst | val_normal
 
         if self.mode == "train":
             self.samples = [s for s in self.all_samples if s["task"] in train_tasks]
         else:
-            self.samples = [s for s in self.all_samples if s["task"] not in train_tasks]
+            self.samples = [s for s in self.all_samples if s["task"] in val_tasks]
+
+        self.samples = self._interleave_samples(self.samples, seed + (0 if self.mode == "train" else 1000))
+
+        train_task_count = len(train_tasks)
+        val_task_count = len(val_tasks)
+        train_obst_count = len(train_obst)
+        val_obst_count = len(val_obst)
+        print(
+            f"Task split | train={train_task_count} (obst={train_obst_count}, normal={train_task_count - train_obst_count}) "
+            f"| val={val_task_count} (obst={val_obst_count}, normal={val_task_count - val_obst_count})"
+        )
 
         print(f"{self.mode.upper()} 集样本数：{len(self.samples)}")
 
