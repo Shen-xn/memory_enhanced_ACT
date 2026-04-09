@@ -24,13 +24,44 @@ def get_fixed_joint_stats():
     }
 
 
-def load_bgra_tensor(path):
+def load_bgra_tensor(path, apply_augmentation=False):
+    """
+    加载BGRA图像并转换为tensor
+    如果apply_augmentation=True，对RGB通道应用随机gamma矫正和噪声
+    """
     image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if image is None:
         raise FileNotFoundError(f"Failed to read image: {path}")
     if image.ndim != 3 or image.shape[2] != 4:
         raise ValueError(f"Expected a 4-channel image, got shape {image.shape} from {path}")
-    return torch.from_numpy(image.copy()).permute(2, 0, 1).float().div_(255.0)
+    
+    # 转换为float32并归一化到[0, 1]
+    image_float = image.astype(np.float32) / 255.0
+    
+    # 只在训练时应用数据增强
+    if apply_augmentation:
+        # 分离RGB和深度通道
+        rgb = image_float[:, :, :3]  # BGR顺序
+        depth = image_float[:, :, 3:]  # 深度通道
+        
+        # 1. 随机gamma矫正 (0.6 ~ 1.4)
+        gamma = np.random.uniform(0.6, 1.4)
+        rgb = np.power(rgb, gamma)
+        
+        # 2. 添加少量随机噪声 (高斯噪声，标准差0.01~0.03)
+        noise_std = np.random.uniform(0.01, 0.03)
+        noise = np.random.normal(0, noise_std, rgb.shape).astype(np.float32)
+        rgb = rgb + noise
+        
+        # 裁剪到有效范围 [0, 1]
+        rgb = np.clip(rgb, 0.0, 1.0)
+        
+        # 重新组合图像
+        image_float = np.concatenate([rgb, depth], axis=2)
+    
+    # 转换为tensor并调整维度顺序
+    tensor = torch.from_numpy(image_float.copy()).permute(2, 0, 1)
+    return tensor
 
 
 class ImitationDataset(Dataset):
@@ -167,12 +198,16 @@ class ImitationDataset(Dataset):
         s = self.samples[idx]
 
         # --------------------- 加载主图像 ---------------------
-        img = load_bgra_tensor(s["img_path"])
+        # 只在训练时应用数据增强
+        apply_aug = (self.mode == "train")
+        img = load_bgra_tensor(s["img_path"], apply_augmentation=apply_aug)
 
         # --------------------- 加载 memory 图像（不存在则返回全零） ---------------------
         if self.use_memory_image_input and s["has_mem_img"]:
-            m_img = load_bgra_tensor(s["mem_img_path"])
+            # memory图像不应用数据增强，保持原始状态
+            m_img = load_bgra_tensor(s["mem_img_path"], apply_augmentation=False)
         else:
+            # 创建全零tensor，需要与img相同的形状
             m_img = torch.zeros_like(img)
 
         # --------------------- 关节 & 标签 ---------------------

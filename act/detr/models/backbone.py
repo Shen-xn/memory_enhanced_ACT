@@ -15,8 +15,8 @@ from act.detr.util.misc import NestedTensor, is_main_process
 
 from .position_encoding import build_position_encoding
 
-import IPython
-e = IPython.embed
+# import IPython
+# e = IPython.embed
 
 class FrozenBatchNorm2d(torch.nn.Module):
     """
