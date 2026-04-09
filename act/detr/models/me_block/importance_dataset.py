@@ -108,9 +108,59 @@ def read_label(path: str) -> np.ndarray:
     return label.astype(np.int64)
 
 
-def augment_image(image: np.ndarray, config: ImportanceTrainingConfig) -> np.ndarray:
+def _sample_affine(config: ImportanceTrainingConfig, width: int, height: int) -> np.ndarray:
+    center = (width / 2.0, height / 2.0)
+    angle = random.uniform(-config.rotation_deg, config.rotation_deg)
+    scale = random.uniform(config.scale_min, config.scale_max)
+    tx = random.uniform(-config.translation_px, config.translation_px)
+    ty = random.uniform(-config.translation_px, config.translation_px)
+    matrix = cv2.getRotationMatrix2D(center, angle, scale)
+    matrix[0, 2] += tx
+    matrix[1, 2] += ty
+    return matrix
+
+
+def _warp_image(image: np.ndarray, matrix: np.ndarray) -> np.ndarray:
+    height, width = image.shape[:2]
+    border_value = tuple([0] * image.shape[2]) if image.ndim == 3 else 0
+    return cv2.warpAffine(
+        image,
+        matrix,
+        (width, height),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=border_value,
+    )
+
+
+def _warp_label(label: np.ndarray, matrix: np.ndarray, unlabeled_index: int) -> np.ndarray:
+    height, width = label.shape[:2]
+    return cv2.warpAffine(
+        label,
+        matrix,
+        (width, height),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=int(unlabeled_index),
+    )
+
+
+def augment_sample(
+    image: np.ndarray,
+    label: np.ndarray,
+    config: ImportanceTrainingConfig,
+    unlabeled_index: int,
+) -> tuple[np.ndarray, np.ndarray]:
     if not config.use_augmentation:
-        return image
+        return image, label
+
+    if random.random() < config.horizontal_flip_prob:
+        image = np.ascontiguousarray(image[:, ::-1])
+        label = np.ascontiguousarray(label[:, ::-1])
+
+    matrix = _sample_affine(config, image.shape[1], image.shape[0])
+    image = _warp_image(image, matrix)
+    label = _warp_label(label, matrix, unlabeled_index)
 
     rgb = np.clip(image[..., :3], 0.0, 1.0)
     gamma = random.uniform(config.gamma_min, config.gamma_max)
@@ -122,7 +172,7 @@ def augment_image(image: np.ndarray, config: ImportanceTrainingConfig) -> np.nda
 
     augmented = image.copy()
     augmented[..., :3] = np.clip(rgb, 0.0, 1.0)
-    return augmented
+    return augmented, label
 
 
 class ImportanceFrameDataset(Dataset):
@@ -216,9 +266,14 @@ class ImportanceFrameDataset(Dataset):
             sample["image_dirname"],
             self.model_config.input_channels,
         ).astype(np.float32) / 255.0
-        if self.split == "train":
-            image = augment_image(image, self.config)
         label = read_label(sample["label_path"])
+        if self.split == "train":
+            image, label = augment_sample(
+                image,
+                label,
+                self.config,
+                self.model_config.unlabeled_index,
+            )
 
         allowed_values = {self.model_config.background_index, self.model_config.unlabeled_index}
         allowed_values.update(range(1, self.model_config.num_foreground_classes + 1))

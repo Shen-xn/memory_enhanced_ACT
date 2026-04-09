@@ -32,6 +32,7 @@ class TaskRecord:
     frame_paths: List[str]
     label_dir: str
     labeled_count: int
+    allow_copy_prev: bool
 
 
 def parse_args(default_data_root: str = "", default_label_dirname: str = "importance_labels") -> argparse.Namespace:
@@ -203,6 +204,7 @@ class ImportanceLabelAnnotator:
                     frame_paths=frame_paths,
                     label_dir=label_dir,
                     labeled_count=labeled_count,
+                    allow_copy_prev=name.startswith("task"),
                 )
             )
         return tasks
@@ -265,7 +267,7 @@ class ImportanceLabelAnnotator:
             label = np.full((height, width), self.unlabeled_index, dtype=np.uint8)
             label_exists = False
             modified = False
-            if self.copy_prev and frame_idx > 0:
+            if self.copy_prev and task.allow_copy_prev and frame_idx > 0:
                 prev_label_path = self._label_path(task.label_dir, task.frame_paths[frame_idx - 1])
                 if os.path.exists(prev_label_path):
                     prev_label = read_label(prev_label_path)

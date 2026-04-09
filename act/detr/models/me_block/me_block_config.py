@@ -84,6 +84,11 @@ class ImportanceTrainingConfig:
     gamma_min: float = 0.6
     gamma_max: float = 1.8
     noise_std: float = 0.02
+    horizontal_flip_prob: float = 0.5
+    translation_px: int = 32
+    rotation_deg: float = 10.0
+    scale_min: float = 0.85
+    scale_max: float = 1.15
     batch_size: int = 4
     num_workers: int = 0
     num_epochs: int = 20
