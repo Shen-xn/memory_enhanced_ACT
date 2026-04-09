@@ -24,7 +24,7 @@ joint_rng = [1000, 1000, 1000, 1000, 1000, 600]
 ```powershell
 python deploy/export_torchscript_models.py `
   --act-checkpoint .\log\exp_xxx\best_model.pth `
-  --output-dir .\deploy_artifacts_baseline `
+  --output-dir deploy_artifacts_baseline `
   --smoke-test
 ```
 
