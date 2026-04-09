@@ -4,8 +4,8 @@ from torch.nn import functional as F
 import torchvision.transforms as transforms
 
 from act.detr.main import build_ACT_model_and_optimizer, build_CNNMLP_model_and_optimizer
-import IPython
-e = IPython.embed
+# import IPython
+# e = IPython.embed
 
 class ACTPolicy(nn.Module):
     def __init__(self, args_override, device=None):

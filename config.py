@@ -14,22 +14,22 @@ class Config:
         self.DATA_ROOT = os.path.join(self.ROOT_DIR, "data_process", "data")
 
         # ===================== 训练配置 =====================
-        self.TRAIN_MODE = "resume"
-        self.RESUME_CKPT_PATH = "C:/Users/DELL/Desktop/me_ACT/memory_enhanced_ACT/log/exp_20260406_042245/ckpt_epoch_6.pth"
+        self.TRAIN_MODE = ""
+        self.RESUME_CKPT_PATH = ""
 
-        self.NUM_EPOCHS = 20
-        self.BATCH_SIZE = 8
-        self.NUM_WORKERS = 8
+        self.NUM_EPOCHS = 100
+        self.BATCH_SIZE = 16
+        self.NUM_WORKERS = 16
         self.FUTURE_STEPS = 10
 
-        self.LR = 1e-4
-        self.LR_BACKBONE = 1e-5
+        self.LR = 1e-5
+        self.LR_BACKBONE = 1e-6
         self.WEIGHT_DECAY = 1e-4
-        self.KL_WEIGHT = 1.0
+        self.KL_WEIGHT = 0.1
 
         self.VAL_FREQ = 1
         self.SAVE_FREQ = 5
-        self.LOG_PRINT_FREQ = 5
+        self.LOG_PRINT_FREQ = 500
         self.SAVE_PLOT = True
         self.PRINT_LOG = True
 
@@ -50,9 +50,9 @@ class Config:
 
         self.ENC_LAYERS_ENC = 4
         self.ENC_LAYERS = 4
-        self.DEC_LAYERS = 6
+        self.DEC_LAYERS = 7
         self.DROPOUT = 0.1
-        self.DIM_FEEDFORWARD = 2048
+        self.DIM_FEEDFORWARD = 3200
         self.HIDDEN_DIM = 512
         self.NHEADS = 8
         self.NUM_QUERIES = self.FUTURE_STEPS

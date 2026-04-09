@@ -14,8 +14,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 
-import IPython
-e = IPython.embed
+# import IPython
+# e = IPython.embed
 
 class Transformer(nn.Module):
 
