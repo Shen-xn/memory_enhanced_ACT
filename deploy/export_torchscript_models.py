@@ -172,13 +172,16 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
     if args.me_block_checkpoint:
         me_block_model = load_me_block_model(args.me_block_checkpoint, device=device).eval()
         me_block_wrapper = MEBlockInferenceWrapper(me_block_model).to(device)
+        num_me_classes = len(me_block_model.config.importance.class_names)
         me_examples = (
             torch.zeros(1, 4, TARGET_HEIGHT, TARGET_WIDTH, device=device),
-            torch.zeros(1, 4, TARGET_HEIGHT, TARGET_WIDTH, device=device),
-            torch.zeros(1, 1, TARGET_HEIGHT, TARGET_WIDTH, device=device),
+            torch.zeros(1, num_me_classes, 4, TARGET_HEIGHT, TARGET_WIDTH, device=device),
+            torch.zeros(1, num_me_classes, TARGET_HEIGHT, TARGET_WIDTH, device=device),
         )
         _trace_and_save(me_block_wrapper, me_examples, str(output_dir / "me_block_inference.pt"))
         has_me_block = True
+    else:
+        num_me_classes = 0
 
     deploy_payload = {
         "target_width": int(TARGET_WIDTH),
@@ -191,6 +194,7 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
         "num_queries": int(act_policy.model.num_queries),
         "use_memory_image_input": use_memory_image_input,
         "has_me_block": has_me_block,
+        "me_block_num_classes": int(num_me_classes),
         "preprocessed_channel_order": "BGRA",
         "act_wrapper_expects": "BGRA_float_0_1",
         "me_block_wrapper_expects": "BGRA_float_0_1",
@@ -218,7 +222,11 @@ def smoke_test(output_dir: str, use_memory_image_input: bool, has_me_block: bool
 
     if has_me_block:
         me_block = torch.jit.load(str(Path(output_dir) / "me_block_inference.pt"), map_location="cpu").eval()
-        memory_image, memory_state, score_state = me_block(image, torch.zeros_like(image), torch.zeros(1, 1, TARGET_HEIGHT, TARGET_WIDTH))
+        memory_image, memory_state, score_state = me_block(
+            image,
+            torch.zeros(1, 3, 4, TARGET_HEIGHT, TARGET_WIDTH),
+            torch.zeros(1, 3, TARGET_HEIGHT, TARGET_WIDTH),
+        )
         print(f"[smoke] me_block outputs: memory_image={tuple(memory_image.shape)}, memory_state={tuple(memory_state.shape)}, score_state={tuple(score_state.shape)}")
 
 

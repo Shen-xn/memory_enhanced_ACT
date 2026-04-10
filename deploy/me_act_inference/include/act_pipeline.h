@@ -17,6 +17,7 @@ struct DeployConfig {
   int num_queries = 10;
   bool use_memory_image_input = false;
   bool has_me_block = false;
+  int me_block_num_classes = 3;
 };
 
 class ActPipeline {

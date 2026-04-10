@@ -68,8 +68,8 @@ class MemoryUpdateConfig:
     # keep_top_ratio means "keep the top keep_top_ratio fraction of pixels by score_state".
     # Example: keep_top_ratio=0.05 keeps the top 5% pixels in each frame.
     score_decay: float = 0.8
-    tau_up: float = 0.2
-    keep_top_ratio: float = 0.8
+    tau_up: float = 0.1
+    keep_top_ratio: float = 0.1
 
 
 @dataclass

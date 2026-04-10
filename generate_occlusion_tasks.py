@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Interactive occlusion generation for four-channel task data.
+Automatic occlusion generation for four-channel task data.
 
 Source tasks:
     task_*
@@ -26,25 +26,9 @@ import cv2
 import numpy as np
 
 
-WINDOW_NAME = "Occlusion Task Generator"
 DEFAULT_TRIGGER_PROB = 0.01
 DEFAULT_CANCEL_PROB = 0.05
-DEFAULT_FRAME_DELAY_MS = 30
 DEFAULT_SEED = 42
-
-
-@dataclass
-class ClickState:
-    frame_width: int = 0
-    frame_height: int = 0
-    point: tuple[int, int] | None = None
-    awaiting: bool = False
-
-    def reset(self, frame_width: int, frame_height: int) -> None:
-        self.frame_width = frame_width
-        self.frame_height = frame_height
-        self.point = None
-        self.awaiting = True
 
 
 @dataclass
@@ -78,19 +62,6 @@ class Occluder:
             "patch_offset": [int(self.patch_offset[0]), int(self.patch_offset[1])],
             "depth_range": [int(self.depth_texture.min()), int(self.depth_texture.max())],
         }
-
-
-def on_mouse(event: int, x: int, y: int, _flags: int, state: ClickState) -> None:
-    if not state.awaiting or event != cv2.EVENT_LBUTTONDOWN:
-        return
-
-    if x >= state.frame_width:
-        x -= state.frame_width
-
-    x = int(np.clip(x, 0, state.frame_width - 1))
-    y = int(np.clip(y, 0, state.frame_height - 1))
-    state.point = (x, y)
-    state.awaiting = False
 
 
 def get_data_root() -> str:
@@ -149,54 +120,6 @@ def read_four_channel_png(path: str) -> np.ndarray:
     if frame.ndim != 3 or frame.shape[2] != 4:
         raise RuntimeError(f"Expected 4-channel PNG, got shape {frame.shape} from {path}")
     return frame
-
-
-def depth_preview(depth_channel: np.ndarray) -> np.ndarray:
-    return cv2.applyColorMap(depth_channel, cv2.COLORMAP_TURBO)
-
-
-def compose_preview(
-    frame: np.ndarray,
-    task_name: str,
-    frame_idx: int,
-    total_frames: int,
-    active: bool,
-    paused_for_click: bool = False,
-) -> np.ndarray:
-    rgb = frame[:, :, :3].copy()
-    depth = depth_preview(frame[:, :, 3])
-    preview = np.hstack([rgb, depth])
-
-    lines = [
-        f"{task_name}  frame {frame_idx + 1}/{total_frames}",
-        "Left: RGB   Right: depth",
-        "Q/ESC: quit   S: skip task",
-    ]
-
-    if paused_for_click:
-        lines.append("Click to place occluder   C: cancel trigger")
-    elif active:
-        lines.append("Occluder active")
-    else:
-        lines.append("Playing")
-
-    y = 24
-    for line in lines:
-        cv2.putText(preview, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (240, 240, 240), 2, cv2.LINE_AA)
-        cv2.putText(preview, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (20, 20, 20), 1, cv2.LINE_AA)
-        y += 24
-
-    return preview
-
-
-def sample_occluder_color(rng: np.random.Generator) -> np.ndarray:
-    hue_raw = int(rng.integers(0, 256))
-    hsv = np.array(
-        [[[int(round(hue_raw * 179.0 / 255.0)), rng.integers(30, 201), rng.integers(50, 201)]]],
-        dtype=np.uint8,
-    )
-    color = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0]
-    return color.astype(np.uint8)
 
 
 def _low_frequency_noise(
@@ -274,7 +197,7 @@ def _build_occluder_textures(
 
 
 def build_random_occluder(
-    click_point: tuple[int, int],
+    spawn_point: tuple[int, int],
     width: int,
     height: int,
     frame_idx: int,
@@ -303,7 +226,7 @@ def build_random_occluder(
     velocity = np.array([np.cos(direction) * speed, np.sin(direction) * speed], dtype=np.float32)
 
     return Occluder(
-        center=np.array(click_point, dtype=np.float32),
+        center=np.array(spawn_point, dtype=np.float32),
         velocity=velocity,
         relative_polygon=polygon,
         bgr_color=mean_color,
@@ -316,10 +239,9 @@ def build_random_occluder(
     )
 
 
-def apply_occluder(frame: np.ndarray, occluder: Occluder, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+def apply_occluder(frame: np.ndarray, occluder: Occluder, rng: np.random.Generator) -> np.ndarray:
     output = frame.copy()
     height, width = frame.shape[:2]
-    mask = np.zeros((height, width), dtype=np.uint8)
 
     patch_h, patch_w = occluder.alpha_texture.shape
     top_left = np.round(occluder.center + occluder.patch_offset).astype(np.int32)
@@ -331,7 +253,7 @@ def apply_occluder(frame: np.ndarray, occluder: Occluder, rng: np.random.Generat
     dst_x1 = min(width, x1)
     dst_y1 = min(height, y1)
     if dst_x0 >= dst_x1 or dst_y0 >= dst_y1:
-        return output, mask
+        return output
 
     src_x0 = dst_x0 - x0
     src_y0 = dst_y0 - y0
@@ -375,9 +297,7 @@ def apply_occluder(frame: np.ndarray, occluder: Occluder, rng: np.random.Generat
 
     output[dst_y0:dst_y1, dst_x0:dst_x1, :3] = np.clip(blended_rgb, 0.0, 255.0).astype(np.uint8)
     output[dst_y0:dst_y1, dst_x0:dst_x1, 3] = np.clip(blended_depth, 0.0, 255.0).astype(np.uint8)
-    visible_mask = ((dilated > 0) | (hard_mask > 0)).astype(np.uint8) * 255
-    mask[dst_y0:dst_y1, dst_x0:dst_x1] = visible_mask
-    return output, mask
+    return output
 
 
 def occluder_out_of_frame(occluder: Occluder, width: int, height: int) -> bool:
@@ -387,17 +307,8 @@ def occluder_out_of_frame(occluder: Occluder, width: int, height: int) -> bool:
     return x_max < 0 or y_max < 0 or x_min >= width or y_min >= height
 
 
-def wait_for_click(preview: np.ndarray, state: ClickState) -> str:
-    while True:
-        cv2.imshow(WINDOW_NAME, preview)
-        key = cv2.waitKey(20) & 0xFF
-        if state.point is not None:
-            return "clicked"
-        if key in (ord("q"), 27):
-            return "quit"
-        if key in (ord("c"), ord("n")):
-            state.awaiting = False
-            return "cancel"
+def sample_spawn_point(width: int, height: int, rng: np.random.Generator) -> tuple[int, int]:
+    return int(rng.integers(0, width)), int(rng.integers(0, height))
 
 
 def save_json(path: str, payload: dict) -> None:
@@ -411,18 +322,14 @@ def process_task(
     rng: np.random.Generator,
     trigger_prob: float,
     cancel_prob: float,
-    frame_delay_ms: int,
-    click_state: ClickState,
-) -> str:
+) -> None:
     source_name = os.path.basename(source_task_dir)
     target_name = os.path.basename(generated_task_dir)
     source_frames = frame_paths(source_task_dir)
 
     os.makedirs(generated_task_dir, exist_ok=True)
     generated_four_channel_dir = os.path.join(generated_task_dir, "four_channel")
-    generated_mask_dir = os.path.join(generated_task_dir, "occlusion_masks")
     ensure_clean_dir(generated_four_channel_dir)
-    ensure_clean_dir(generated_mask_dir)
     copy_csv_metadata(source_task_dir, generated_task_dir)
 
     occluder: Occluder | None = None
@@ -435,49 +342,21 @@ def process_task(
         height, width = frame.shape[:2]
 
         if occluder is None and rng.random() < trigger_prob:
-            paused_preview = compose_preview(
-                frame=frame,
-                task_name=source_name,
-                frame_idx=frame_idx,
-                total_frames=len(source_frames),
-                active=False,
-                paused_for_click=True,
-            )
-            click_state.reset(width, height)
-            result = wait_for_click(paused_preview, click_state)
-            if result == "quit":
-                return "quit"
-            if result == "clicked" and click_state.point is not None:
-                occluder = build_random_occluder(click_state.point, width, height, frame_idx, rng)
-                current_event = {
-                    "start_frame": frame_idx,
-                    "start_image": frame_name,
-                    "click_point": [int(click_state.point[0]), int(click_state.point[1])],
-                    "occluder": occluder.as_meta(),
-                }
+            spawn_point = sample_spawn_point(width, height, rng)
+            occluder = build_random_occluder(spawn_point, width, height, frame_idx, rng)
+            current_event = {
+                "start_frame": frame_idx,
+                "start_image": frame_name,
+                "spawn_point": [int(spawn_point[0]), int(spawn_point[1])],
+                "occluder": occluder.as_meta(),
+            }
 
         if occluder is not None:
-            output_frame, mask = apply_occluder(frame, occluder, rng)
+            output_frame = apply_occluder(frame, occluder, rng)
         else:
             output_frame = frame.copy()
-            mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-
-        preview = compose_preview(
-            frame=output_frame,
-            task_name=source_name,
-            frame_idx=frame_idx,
-            total_frames=len(source_frames),
-            active=occluder is not None,
-        )
-        cv2.imshow(WINDOW_NAME, preview)
-        key = cv2.waitKey(frame_delay_ms) & 0xFF
-        if key in (ord("q"), 27):
-            return "quit"
-        if key == ord("s"):
-            return "skip"
 
         cv2.imwrite(os.path.join(generated_four_channel_dir, frame_name), output_frame)
-        cv2.imwrite(os.path.join(generated_mask_dir, frame_name), mask)
 
         if occluder is not None:
             occluder.advance()
@@ -510,22 +389,19 @@ def process_task(
         "frame_count": len(source_frames),
         "trigger_probability": trigger_prob,
         "cancel_probability": cancel_prob,
-        "frame_delay_ms": frame_delay_ms,
         "events": events,
     }
     save_json(os.path.join(generated_task_dir, "occlusion_meta.json"), meta)
-    return "done"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate interactive occluded task_* datasets.")
+    parser = argparse.ArgumentParser(description="Generate automatic occluded task_* datasets.")
     parser.add_argument("--data-root", type=str, default=get_data_root(), help="Root directory containing task_* folders.")
     parser.add_argument("--task-filter", type=str, default=None, help="Only process source tasks whose name contains this text.")
     parser.add_argument("--force", action="store_true", help="Regenerate tasks even if matching task_obst_* already exists.")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed.")
     parser.add_argument("--trigger-prob", type=float, default=DEFAULT_TRIGGER_PROB, help="Per-frame probability of triggering a new occluder.")
     parser.add_argument("--cancel-prob", type=float, default=DEFAULT_CANCEL_PROB, help="Per-frame probability of canceling an active occluder.")
-    parser.add_argument("--frame-delay-ms", type=int, default=DEFAULT_FRAME_DELAY_MS, help="Playback delay between frames.")
     return parser.parse_args()
 
 
@@ -539,49 +415,30 @@ def main() -> None:
         return
 
     print(f"Found {len(tasks)} source tasks under: {args.data_root}")
-    print("Controls: left click = place occluder, C = cancel trigger, S = skip task, Q/ESC = quit")
-
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    click_state = ClickState()
-    cv2.setMouseCallback(WINDOW_NAME, on_mouse, click_state)
 
     processed = 0
     skipped = 0
 
-    try:
-        for source_task_dir in tasks:
-            generated_task_dir = target_task_dir(source_task_dir)
-            source_name = os.path.basename(source_task_dir)
-            target_name = os.path.basename(generated_task_dir)
+    for source_task_dir in tasks:
+        generated_task_dir = target_task_dir(source_task_dir)
+        source_name = os.path.basename(source_task_dir)
+        target_name = os.path.basename(generated_task_dir)
 
-            if not args.force and task_complete(source_task_dir, generated_task_dir):
-                print(f"Skip completed task: {source_name} -> {target_name}")
-                skipped += 1
-                continue
+        if not args.force and task_complete(source_task_dir, generated_task_dir):
+            print(f"Skip completed task: {source_name} -> {target_name}")
+            skipped += 1
+            continue
 
-            print(f"Processing: {source_name} -> {target_name}")
-            result = process_task(
-                source_task_dir=source_task_dir,
-                generated_task_dir=generated_task_dir,
-                rng=rng,
-                trigger_prob=args.trigger_prob,
-                cancel_prob=args.cancel_prob,
-                frame_delay_ms=args.frame_delay_ms,
-                click_state=click_state,
-            )
-
-            if result == "quit":
-                print("Stopped by user.")
-                break
-            if result == "skip":
-                print(f"Skipped current task: {source_name}")
-                skipped += 1
-                continue
-
-            processed += 1
-            print(f"Finished: {source_name}")
-    finally:
-        cv2.destroyAllWindows()
+        print(f"Processing: {source_name} -> {target_name}")
+        process_task(
+            source_task_dir=source_task_dir,
+            generated_task_dir=generated_task_dir,
+            rng=rng,
+            trigger_prob=args.trigger_prob,
+            cancel_prob=args.cancel_prob,
+        )
+        processed += 1
+        print(f"Finished: {source_name}")
 
     print(f"Summary: processed={processed}, skipped={skipped}")
 

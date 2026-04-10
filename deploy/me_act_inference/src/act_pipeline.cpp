@@ -75,10 +75,10 @@ std::vector<std::vector<float>> ActPipeline::PredictFromFourChannel(
 
 void ActPipeline::ResetMemory() {
   prev_memory_ = torch::zeros(
-      {1, 4, config_.target_height, config_.target_width},
+      {1, config_.me_block_num_classes, 4, config_.target_height, config_.target_width},
       torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   prev_scores_ = torch::zeros(
-      {1, 1, config_.target_height, config_.target_width},
+      {1, config_.me_block_num_classes, config_.target_height, config_.target_width},
       torch::TensorOptions().dtype(torch::kFloat32).device(device_));
 }
 
@@ -101,6 +101,9 @@ DeployConfig ActPipeline::LoadConfig(const std::string& path) {
   int has_me_block = 0;
   fs["use_memory_image_input"] >> use_memory;
   fs["has_me_block"] >> has_me_block;
+  if (!fs["me_block_num_classes"].empty()) {
+    fs["me_block_num_classes"] >> cfg.me_block_num_classes;
+  }
   cfg.use_memory_image_input = use_memory != 0;
   cfg.has_me_block = has_me_block != 0;
   return cfg;
