@@ -204,7 +204,7 @@ def build_random_occluder(
     rng: np.random.Generator,
 ) -> Occluder:
     min_dim = min(width, height)
-    base_radius = float(rng.uniform(0.05, 0.8) * min_dim)
+    base_radius = float(rng.uniform(0.03, 0.7) * min_dim)
     num_vertices = int(rng.integers(7, 13))
 
     angles = np.linspace(0.0, 2.0 * np.pi, num_vertices, endpoint=False)
