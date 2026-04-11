@@ -3,6 +3,7 @@
 #include <message_filters/sync_policies/approximate_time.h>
 #include <message_filters/synchronizer.h>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <sensor_msgs/image_encodings.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <std_srvs/srv/trigger.hpp>
@@ -75,10 +76,14 @@ class MeActInferenceNode : public rclcpp::Node {
 
     pipeline_ = std::make_unique<ActPipeline>(deploy_dir_, device_);
 
+    callback_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+
     servo_command_pub_ =
         create_publisher<ros_robot_controller_msgs::msg::ServosPosition>(servo_command_topic_, 10);
+    rclcpp::ClientOptions client_options;
+    client_options.callback_group = callback_group_;
     servo_state_client_ =
-        create_client<ros_robot_controller_msgs::srv::GetBusServoState>(servo_state_service_);
+        create_client<ros_robot_controller_msgs::srv::GetBusServoState>(servo_state_service_, client_options);
 
     rgb_sub_.subscribe(this, rgb_topic_);
     depth_sub_.subscribe(this, depth_topic_);
@@ -99,7 +104,8 @@ class MeActInferenceNode : public rclcpp::Node {
 
     control_timer_ = create_wall_timer(
         std::chrono::milliseconds(control_period_ms_),
-        std::bind(&MeActInferenceNode::OnControlTimer, this));
+        std::bind(&MeActInferenceNode::OnControlTimer, this),
+        callback_group_);
 
     state_ = enable_inference_on_start_ ? RunState::RUNNING : RunState::IDLE;
     if (enable_me_block_ && !pipeline_->UsesMemoryImageInput()) {
@@ -477,6 +483,7 @@ class MeActInferenceNode : public rclcpp::Node {
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr estop_srv_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr initialize_srv_;
   rclcpp::TimerBase::SharedPtr control_timer_;
+  rclcpp::CallbackGroup::SharedPtr callback_group_;
 
   rclcpp::Time next_command_allowed_at_{0, 0, RCL_ROS_TIME};
   rclcpp::Time initialize_until_{0, 0, RCL_ROS_TIME};
@@ -486,7 +493,9 @@ int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
   try {
     auto node = std::make_shared<MeActInferenceNode>();
-    rclcpp::spin(node);
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+    executor.add_node(node);
+    executor.spin();
   } catch (const std::exception& exc) {
     fprintf(stderr, "me_act_inference_node failed to start: %s\n", exc.what());
   }

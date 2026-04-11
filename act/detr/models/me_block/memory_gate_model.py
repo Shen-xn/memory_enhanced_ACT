@@ -25,6 +25,7 @@ def normalize_image_channels(images: torch.Tensor, config: ImportanceModelConfig
     std = _channel_tensor(config.image_std[: images.shape[1]], images.device, images.dtype)
     return (images - mean) / std
 
+
 def select_segmentation_input(images: torch.Tensor, config: ImportanceModelConfig) -> torch.Tensor:
     expected_channels = int(config.segmentation_input_channels)
     if images.shape[1] < expected_channels:
@@ -96,7 +97,6 @@ class TruncatedResNet18Layer2Segmentation(nn.Module):
         self.stem = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool)
         self.layer1 = backbone.layer1
         self.layer2 = backbone.layer2
-        self.layer3 = backbone.layer3
         self.head = nn.Sequential(
             nn.Conv2d(128, 64, kernel_size=1, bias=False),
             nn.BatchNorm2d(64),
@@ -146,34 +146,11 @@ class MemoryImageUpdater(nn.Module):
         self.importance_config = importance_config
         self.memory_config = memory_config
 
-        weights = importance_config.normalized_class_weights()
-        ordered = [weights[name] for name in importance_config.class_names]
-        self.register_buffer("class_weights", torch.tensor(ordered, dtype=torch.float32).view(1, -1, 1, 1))
-
     @property
     def num_classes(self) -> int:
         return len(self.importance_config.class_names)
 
-    def compute_importance_score(
-        self,
-        class_probs: torch.Tensor,
-        background_prob: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        if class_probs.size(1) != self.class_weights.size(1):
-            raise ValueError(
-                f"Expected {self.class_weights.size(1)} class probability maps, got {class_probs.size(1)}."
-            )
-        importance_score = torch.sum(
-            class_probs * self.class_weights.to(class_probs.device, class_probs.dtype),
-            dim=1,
-            keepdim=True,
-        )
-        if background_prob is not None:
-            importance_score = importance_score * (1.0 - background_prob.to(class_probs.dtype))
-        return importance_score
-
-    def _top_fraction_mask(self, scores: torch.Tensor) -> torch.Tensor:
-        keep_ratio = float(self.memory_config.keep_top_ratio)
+    def _top_fraction_mask(self, scores: torch.Tensor, keep_ratio: float) -> torch.Tensor:
         if keep_ratio <= 0:
             return torch.zeros_like(scores, dtype=torch.bool)
         if keep_ratio >= 1:
@@ -185,48 +162,6 @@ class MemoryImageUpdater(nn.Module):
         topk_indices = flat_scores.topk(keep_count, dim=1).indices
         flat_mask = torch.zeros_like(flat_scores, dtype=torch.float32).scatter(1, topk_indices, 1.0).to(torch.bool)
         return flat_mask.view(batch_size, 1, height, width)
-
-    def _prepare_prev_memory(self, current_image: torch.Tensor, prev_memory: Optional[torch.Tensor]) -> torch.Tensor:
-        if prev_memory is None:
-            return torch.zeros(
-                current_image.size(0),
-                self.num_classes,
-                current_image.size(1),
-                current_image.size(2),
-                current_image.size(3),
-                device=current_image.device,
-                dtype=current_image.dtype,
-            )
-        if prev_memory.dim() == 4:
-            return prev_memory.unsqueeze(1).repeat(1, self.num_classes, 1, 1, 1)
-        if prev_memory.dim() != 5 or prev_memory.size(1) != self.num_classes:
-            raise ValueError(
-                f"Expected prev_memory shape [B, C, H, W] or [B, {self.num_classes}, C, H, W], got {tuple(prev_memory.shape)}."
-            )
-        return prev_memory.to(device=current_image.device, dtype=current_image.dtype)
-
-    def _prepare_prev_scores(self, current_image: torch.Tensor, prev_scores: Optional[torch.Tensor]) -> torch.Tensor:
-        batch_size, _, height, width = current_image.shape
-        if prev_scores is None:
-            return torch.zeros(
-                batch_size,
-                self.num_classes,
-                height,
-                width,
-                device=current_image.device,
-                dtype=current_image.dtype,
-            )
-        if prev_scores.dim() != 4:
-            raise ValueError(
-                f"Expected prev_scores shape [B, 1, H, W] or [B, {self.num_classes}, H, W], got {tuple(prev_scores.shape)}."
-            )
-        if prev_scores.size(1) == 1:
-            return prev_scores.repeat(1, self.num_classes, 1, 1).to(device=current_image.device, dtype=current_image.dtype)
-        if prev_scores.size(1) != self.num_classes:
-            raise ValueError(
-                f"Expected prev_scores channels to be 1 or {self.num_classes}, got {prev_scores.size(1)}."
-            )
-        return prev_scores.to(device=current_image.device, dtype=current_image.dtype)
 
     def step(
         self,
@@ -245,14 +180,42 @@ class MemoryImageUpdater(nn.Module):
                 f"Expected {self.importance_config.input_channels} channels, got {channels}."
             )
 
-        prev_memory = self._prepare_prev_memory(current_image, prev_memory)
-        prev_scores = self._prepare_prev_scores(current_image, prev_scores)
+        if prev_memory is None:
+            prev_memory = torch.zeros(
+                batch_size,
+                self.num_classes,
+                channels,
+                height,
+                width,
+                device=current_image.device,
+                dtype=current_image.dtype,
+            )
+        elif prev_memory.dim() != 5 or prev_memory.size(1) != self.num_classes or prev_memory.size(2) != channels:
+            raise ValueError(
+                f"Expected prev_memory shape [B, {self.num_classes}, {channels}, H, W], got {tuple(prev_memory.shape)}."
+            )
+        else:
+            prev_memory = prev_memory.to(device=current_image.device, dtype=current_image.dtype)
+
+        if prev_scores is None:
+            prev_scores = torch.zeros(
+                batch_size,
+                self.num_classes,
+                height,
+                width,
+                device=current_image.device,
+                dtype=current_image.dtype,
+            )
+        elif prev_scores.dim() != 4 or prev_scores.size(1) != self.num_classes:
+            raise ValueError(
+                f"Expected prev_scores shape [B, {self.num_classes}, H, W], got {tuple(prev_scores.shape)}."
+            )
+        else:
+            prev_scores = prev_scores.to(device=current_image.device, dtype=current_image.dtype)
 
         candidate_scores = class_probs.to(current_image.dtype)
         if background_prob is not None:
             candidate_scores = candidate_scores * (1.0 - background_prob.to(current_image.dtype))
-
-        importance_score = self.compute_importance_score(class_probs, background_prob=background_prob).to(current_image.dtype)
         decayed_scores = prev_scores * float(self.memory_config.score_decay)
         write_mask_per_class = candidate_scores > (decayed_scores + float(self.memory_config.tau_up))
 
@@ -264,8 +227,14 @@ class MemoryImageUpdater(nn.Module):
         occupied = torch.zeros((batch_size, 1, height, width), device=current_image.device, dtype=torch.bool)
         memory_image = torch.zeros_like(current_image)
 
+        keep_ratios = [
+            float(self.memory_config.keep_top_ratio_target),
+            float(self.memory_config.keep_top_ratio_goal),
+            float(self.memory_config.keep_top_ratio_arm),
+        ]
         for class_idx in range(self.num_classes):
-            class_mask = self._top_fraction_mask(score_state[:, class_idx : class_idx + 1]) & (~occupied)
+            keep_ratio = keep_ratios[class_idx] if class_idx < len(keep_ratios) else keep_ratios[-1]
+            class_mask = self._top_fraction_mask(score_state[:, class_idx : class_idx + 1], keep_ratio) & (~occupied)
             occupied |= class_mask
             memory_image = torch.where(
                 class_mask.expand_as(current_image),
@@ -275,6 +244,7 @@ class MemoryImageUpdater(nn.Module):
 
         output_mask = occupied
         write_mask = torch.any(write_mask_per_class, dim=1, keepdim=True)
+        importance_score = torch.max(candidate_scores, dim=1, keepdim=True).values
 
         return MemoryStepResult(
             memory_image=memory_image,

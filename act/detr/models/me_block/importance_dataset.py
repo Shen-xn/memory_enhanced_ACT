@@ -48,7 +48,6 @@ def list_task_dirs(data_root: str, image_dirname: str = "auto") -> List[str]:
     special_dir = os.path.join(data_root, "special_data")
     if os.path.isdir(special_dir):
         candidates.append(special_dir)
-
     return [
         path
         for path in candidates

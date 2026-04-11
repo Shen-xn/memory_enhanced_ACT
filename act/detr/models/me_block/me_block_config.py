@@ -2,24 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Dict, List
 
 
 DEFAULT_CLASS_NAMES = ["target", "goal", "arm"]
-DEFAULT_CLASS_WEIGHTS = {
-    "target": 0.5,
-    "goal": 0.3,
-    "arm": 0.2,
-}
-
-
-def normalize_class_weights(class_names: List[str], weights: Dict[str, float]) -> Dict[str, float]:
-    normalized = {name: max(float(weights.get(name, 0.0)), 0.0) for name in class_names}
-    total = sum(normalized.values())
-    if total <= 0.0:
-        raise ValueError("Class weights must sum to a positive value.")
-    return {name: value / total for name, value in normalized.items()}
 
 
 @dataclass
@@ -32,13 +19,9 @@ class ImportanceModelConfig:
     background_index: int = 0
     unlabeled_index: int = 255
     class_names: List[str] = field(default_factory=lambda: list(DEFAULT_CLASS_NAMES))
-    class_weights: Dict[str, float] = field(default_factory=lambda: dict(DEFAULT_CLASS_WEIGHTS))
     image_mean: List[float] = field(default_factory=lambda: [0.485, 0.456, 0.406, 0.5])
     image_std: List[float] = field(default_factory=lambda: [0.229, 0.224, 0.225, 0.5])
     pretrained_backbone: bool = True
-
-    def normalized_class_weights(self) -> Dict[str, float]:
-        return normalize_class_weights(self.class_names, self.class_weights)
 
     @property
     def num_foreground_classes(self) -> int:
@@ -48,28 +31,16 @@ class ImportanceModelConfig:
     def num_output_classes(self) -> int:
         return self.num_foreground_classes + 1
 
-    @property
-    def class_to_index(self) -> Dict[str, int]:
-        return {name: idx + 1 for idx, name in enumerate(self.class_names)}
-
-    @property
-    def index_to_class(self) -> Dict[int, str]:
-        mapping = {self.background_index: "background"}
-        mapping.update({idx: name for name, idx in self.class_to_index.items()})
-        return mapping
-
 
 @dataclass
 class MemoryUpdateConfig:
-    # Changes in this block do not require retraining the segmenter.
-    # They only affect memory-image generation, so regenerate memory images.
-    # Note: generate_memory_images.py loads these values from the checkpoint config.
-    # Changing only the defaults here will not modify an old checkpoint automatically.
-    # keep_top_ratio means "keep the top keep_top_ratio fraction of pixels by score_state".
-    # Example: keep_top_ratio=0.05 keeps the top 5% pixels in each frame.
+    # keep_top_ratio_* means "keep the top fraction of pixels by score_state for each class".
+    # Example: keep_top_ratio_target=0.05 keeps the top 5% target pixels in each frame.
     score_decay: float = 0.8
     tau_up: float = 0.1
-    keep_top_ratio: float = 0.1
+    keep_top_ratio_target: float = 0.1
+    keep_top_ratio_goal: float = 0.1
+    keep_top_ratio_arm: float = 0.1
 
 
 @dataclass
@@ -110,8 +81,6 @@ class MemoryGenerationConfig:
     output_dirname: str = "memory_image_four_channel"
     save_score_dirname: str = "memory_scores"
     save_mask_dirname: str = "memory_binary_masks"
-    task_filter: str = ""
-    force: bool = False
 
 
 @dataclass
@@ -133,12 +102,28 @@ def default_me_block_config() -> MEBlockConfig:
     return MEBlockConfig()
 
 
+def _filter_dataclass_payload(cls, payload: Dict | None) -> Dict:
+    allowed = {item.name for item in fields(cls)}
+    return {key: value for key, value in dict(payload or {}).items() if key in allowed}
+
+
+def importance_model_config_from_dict(payload: Dict | None) -> ImportanceModelConfig:
+    data = _filter_dataclass_payload(ImportanceModelConfig, payload)
+    return ImportanceModelConfig(**data)
+
+
 def memory_update_config_from_dict(payload: Dict | None) -> MemoryUpdateConfig:
     data = dict(payload or {})
-    if "keep_top_ratio" not in data and "tau_out" in data:
-        data["keep_top_ratio"] = data.pop("tau_out")
-    data.pop("output_dilation_radius", None)
+    data = _filter_dataclass_payload(MemoryUpdateConfig, data)
     return MemoryUpdateConfig(**data)
+
+
+def training_config_from_dict(payload: Dict | None) -> ImportanceTrainingConfig:
+    return ImportanceTrainingConfig(**_filter_dataclass_payload(ImportanceTrainingConfig, payload))
+
+
+def generation_config_from_dict(payload: Dict | None) -> MemoryGenerationConfig:
+    return MemoryGenerationConfig(**_filter_dataclass_payload(MemoryGenerationConfig, payload))
 
 
 def save_config(config: MEBlockConfig, path: str) -> None:
@@ -151,8 +136,8 @@ def load_config(path: str) -> MEBlockConfig:
     with open(path, "r", encoding="utf-8") as f:
         payload = json.load(f)
     return MEBlockConfig(
-        importance=ImportanceModelConfig(**payload.get("importance", {})),
+        importance=importance_model_config_from_dict(payload.get("importance", {})),
         memory=memory_update_config_from_dict(payload.get("memory", {})),
-        training=ImportanceTrainingConfig(**payload.get("training", {})),
-        generation=MemoryGenerationConfig(**payload.get("generation", {})),
+        training=training_config_from_dict(payload.get("training", {})),
+        generation=generation_config_from_dict(payload.get("generation", {})),
     )

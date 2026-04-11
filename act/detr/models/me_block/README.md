@@ -131,7 +131,7 @@ write_mask = importance_score > decayed_score + tau_up
 
 `memory_state` 是覆盖式更新，不是平均融合。
 
-最终输出 mask 不是固定阈值，而是保留 `score_state` 最高的前 `keep_top_ratio` 像素。
+最终输出 mask 不是固定阈值，而是按类分别保留 `score_state` 最高的前 `keep_top_ratio_target/goal/arm` 像素。
 
 ## 和 ACT 的关系
 

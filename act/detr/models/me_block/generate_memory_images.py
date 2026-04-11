@@ -12,11 +12,12 @@ import torch
 from tqdm import tqdm
 
 from .me_block_config import (
-    ImportanceModelConfig,
     MEBlockConfig,
-    ImportanceTrainingConfig,
     MemoryGenerationConfig,
+    generation_config_from_dict,
+    importance_model_config_from_dict,
     memory_update_config_from_dict,
+    training_config_from_dict,
 )
 from .importance_dataset import list_task_dirs, read_four_channel
 from .memory_gate_model import ImportanceMemoryModel
@@ -37,14 +38,17 @@ def load_model_from_checkpoint(path: str, device: torch.device) -> ImportanceMem
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     config_payload = checkpoint["config"]
     config = MEBlockConfig(
-        importance=ImportanceModelConfig(**config_payload["importance"]),
+        importance=importance_model_config_from_dict(config_payload.get("importance", {})),
         memory=memory_update_config_from_dict(config_payload["memory"]),
-        training=ImportanceTrainingConfig(**config_payload.get("training", {})),
-        generation=MemoryGenerationConfig(**config_payload.get("generation", {})),
+        training=training_config_from_dict(config_payload.get("training", {})),
+        generation=generation_config_from_dict(config_payload.get("generation", {})),
     )
 
     model = ImportanceMemoryModel(config=config).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model_state = checkpoint["model_state_dict"]
+    allowed_keys = model.state_dict()
+    filtered_state = {key: value for key, value in model_state.items() if key in allowed_keys}
+    model.load_state_dict(filtered_state, strict=True)
     model.eval()
     return model
 
@@ -78,18 +82,10 @@ def save_png_uint8(path: str, image: np.ndarray) -> None:
     cv2.imwrite(path, image)
 
 
-def collapse_score_for_debug(score_state: torch.Tensor, class_weights: dict[str, float]) -> torch.Tensor:
+def collapse_score_for_debug(score_state: torch.Tensor) -> torch.Tensor:
     if score_state.size(1) == 1:
         return score_state
-    ordered_weights = [class_weights[name] for name in ["target", "goal", "arm"] if name in class_weights]
-    if len(ordered_weights) != score_state.size(1):
-        return torch.max(score_state, dim=1, keepdim=True).values
-    weight_tensor = torch.tensor(
-        ordered_weights,
-        device=score_state.device,
-        dtype=score_state.dtype,
-    ).view(1, -1, 1, 1)
-    return torch.sum(score_state * weight_tensor, dim=1, keepdim=True)
+    return torch.max(score_state, dim=1, keepdim=True).values
 
 
 def clear_png_dir(path: str) -> None:
@@ -160,7 +156,7 @@ def generate_for_task(
         memory_uint8 = (step.memory_image.squeeze(0).permute(1, 2, 0).clamp(0.0, 1.0).cpu().numpy() * 255.0).astype(np.uint8)
         save_png_uint8(os.path.join(output_dir, frame_name), memory_uint8)
         if debug:
-            debug_score = collapse_score_for_debug(step.score_state, model.config.importance.normalized_class_weights())
+            debug_score = collapse_score_for_debug(step.score_state)
             score_uint8 = (debug_score.squeeze(0).squeeze(0).clamp(0.0, 1.0).cpu().numpy() * 255.0).astype(np.uint8)
             mask_uint8 = (step.output_mask.squeeze(0).squeeze(0).cpu().numpy().astype(np.uint8) * 255)
             importance_uint8 = (step.importance_score.squeeze(0).squeeze(0).clamp(0.0, 1.0).cpu().numpy() * 255.0).astype(np.uint8)
@@ -181,11 +177,12 @@ def generate_for_task(
             "importance_dirname": "importance_scores",
             "write_mask_dirname": "write_masks",
             "class_names": model.config.importance.class_names,
-            "class_weights": model.config.importance.normalized_class_weights(),
             "memory": {
                 "score_decay": model.config.memory.score_decay,
                 "tau_up": model.config.memory.tau_up,
-                "keep_top_ratio": model.config.memory.keep_top_ratio,
+                "keep_top_ratio_target": model.config.memory.keep_top_ratio_target,
+                "keep_top_ratio_goal": model.config.memory.keep_top_ratio_goal,
+                "keep_top_ratio_arm": model.config.memory.keep_top_ratio_arm,
             },
         }
         with open(os.path.join(task_dir, "memory_image_meta.json"), "w", encoding="utf-8") as f:
