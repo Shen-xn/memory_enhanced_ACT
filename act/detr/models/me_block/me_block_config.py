@@ -36,11 +36,11 @@ class ImportanceModelConfig:
 class MemoryUpdateConfig:
     # keep_top_ratio_* means "keep the top fraction of pixels by score_state for each class".
     # Example: keep_top_ratio_target=0.05 keeps the top 5% target pixels in each frame.
-    score_decay: float = 0.8
+    score_decay: float = 0.92
     tau_up: float = 0.1
-    keep_top_ratio_target: float = 0.1
-    keep_top_ratio_goal: float = 0.1
-    keep_top_ratio_arm: float = 0.1
+    keep_top_ratio_target: float = 0.05
+    keep_top_ratio_goal: float = 0.08
+    keep_top_ratio_arm: float = 0.2
 
 
 @dataclass
@@ -62,9 +62,9 @@ class ImportanceTrainingConfig:
     scale_max: float = 1.15
     batch_size: int = 4
     num_workers: int = 0
-    num_epochs: int = 20
-    learning_rate: float = 1e-4
-    weight_decay: float = 3e-4
+    num_epochs: int = 60
+    learning_rate: float = 5e-5
+    weight_decay: float = 1e-4
     train_ratio: float = 0.8
     seed: int = 42
     save_root: str = ""
