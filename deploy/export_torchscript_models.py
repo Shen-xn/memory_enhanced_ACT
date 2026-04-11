@@ -1,3 +1,5 @@
+"""Export trained ACT/me_block checkpoints to TorchScript deployment artifacts."""
+
 from __future__ import annotations
 
 import argparse
@@ -49,6 +51,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _pick(payload: Dict, key: str, default=None):
+    """Read config values from either old top-level keys or MODEL_PARAMS."""
     model_params = payload.get("MODEL_PARAMS") or {}
     if key in payload:
         return payload[key]
@@ -56,6 +59,7 @@ def _pick(payload: Dict, key: str, default=None):
 
 
 def normalize_act_config(payload: Dict) -> Dict:
+    """Convert historical checkpoint config shapes into current ACT args."""
     use_memory = payload.get("USE_MEMORY_IMAGE_INPUT")
     if use_memory is None:
         use_memory = _pick(payload, "use_memory_image_input")
@@ -101,6 +105,7 @@ def normalize_act_config(payload: Dict) -> Dict:
 
 
 def load_act_policy(checkpoint_path: str, device: torch.device) -> Tuple[ACTPolicy, Dict]:
+    """Rebuild ACTPolicy from a checkpoint and load its weights strictly."""
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     args_override = normalize_act_config(checkpoint["config"])
     policy = ACTPolicy(args_override, device=device).eval()
@@ -109,12 +114,14 @@ def load_act_policy(checkpoint_path: str, device: torch.device) -> Tuple[ACTPoli
 
 
 def _trace_and_save(module: torch.nn.Module, example_inputs: Tuple[torch.Tensor, ...], output_path: str) -> None:
+    """Trace, freeze, and save one TorchScript module."""
     traced = torch.jit.trace(module.eval(), example_inputs, strict=False)
     traced = torch.jit.freeze(traced)
     traced.save(output_path)
 
 
 def write_deploy_config(path: str, payload: Dict) -> None:
+    """Write C++-readable deployment metadata using OpenCV FileStorage."""
     fs = cv2.FileStorage(path, cv2.FILE_STORAGE_WRITE)
     if not fs.isOpened():
         raise RuntimeError(f"Failed to open deploy config for writing: {path}")
@@ -127,6 +134,7 @@ def write_deploy_config(path: str, payload: Dict) -> None:
 
 
 def export_artifacts(args: argparse.Namespace) -> Dict:
+    """Export ACT and optional me_block modules plus deploy_config.yml."""
     device = torch.device("cuda" if args.device == "cuda" and torch.cuda.is_available() else "cpu")
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -211,6 +219,7 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
 
 
 def smoke_test(output_dir: str, use_memory_image_input: bool, has_me_block: bool, me_block_num_classes: int) -> None:
+    """Run CPU forward passes through exported modules to catch shape errors."""
     act_module = torch.jit.load(str(Path(output_dir) / "act_inference.pt"), map_location="cpu").eval()
     qpos = torch.zeros(1, 6)
     image = torch.zeros(1, 4, TARGET_HEIGHT, TARGET_WIDTH)

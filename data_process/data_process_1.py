@@ -1,3 +1,10 @@
+"""Prepare raw robot demonstrations for ACT training.
+
+This script mutates task folders after creating `task_copy/`. Its job is to
+keep CSV rows, RGB frames, depth frames, and normalized depth frames aligned by
+frame id before producing `states_filtered.csv`.
+"""
+
 import os
 import shutil
 import glob
@@ -20,11 +27,13 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # ======================================================
 
 def natural_sort(lst):
+    """Sort filenames by embedded numbers instead of lexicographic order."""
     convert = lambda text: int(text) if text.isdigit() else text.lower()
     alphanum_key = lambda key: [convert(c) for c in re.split('([0-9]+)', key)]
     return sorted(lst, key=alphanum_key)
 
 def backup_task_folder(task_dir):
+    """Create a one-time backup before destructive preprocessing."""
     backup_dir = os.path.join(task_dir, "task_copy")
     if os.path.exists(backup_dir):
         return
@@ -32,6 +41,7 @@ def backup_task_folder(task_dir):
     print(f"[OK] 备份完成：{backup_dir}")
 
 def process_depth_images(task_dir):
+    """Clip raw depth and save an 8-bit normalized copy per frame."""
     depth_in_dir = os.path.join(task_dir, "depth")
     depth_out_dir = os.path.join(task_dir, "depth_normalized")
     os.makedirs(depth_out_dir, exist_ok=True)
@@ -50,12 +60,14 @@ def process_depth_images(task_dir):
         Image.fromarray(img).save(out_path, "JPEG")
 
 def frame_number_from_path(path):
+    """Extract the numeric frame id from a sensor image filename."""
     matches = re.findall(r"\d+", os.path.basename(path))
     if not matches:
         raise ValueError(f"文件名没有帧号: {path}")
     return int(matches[0])
 
 def index_frame_files(img_dir, pattern):
+    """Map frame id to file path and reject duplicated frame ids."""
     frame_map = {}
     duplicates = []
     for path in natural_sort(glob.glob(os.path.join(img_dir, pattern))):
@@ -136,6 +148,7 @@ def sync_raw_images_with_csv(task_dir):
     return True
 
 def clean_bad_rows_in_trajectory(df, task_dir):
+    """Remove invalid joint rows and delete their corresponding images."""
     joint_cols = [c for c in df.columns if c != "frame"]
     original_len = len(df)
 
@@ -155,6 +168,7 @@ def clean_bad_rows_in_trajectory(df, task_dir):
     return df_clean
 
 def smooth_trajectory(df):
+    """Apply Savitzky-Golay smoothing to joint columns."""
     joint_cols = [col for col in df.columns if col != "frame"]
     for col in joint_cols:
         df[col] = savgol_filter(df[col], window_length=WINDOW_SIZE, polyorder=POLY_ORDER, mode="nearest")
@@ -162,6 +176,7 @@ def smooth_trajectory(df):
     return df
 
 def filter_trajectory(df):
+    """Drop near-static frames while preserving occasional samples across pauses."""
     if len(df) <= 1:
         return df
 
@@ -187,6 +202,7 @@ def filter_trajectory(df):
     return filtered_df
 
 def delete_unused_images(task_dir, frame_list, delete_mode=False):
+    """Delete images either in `frame_list` or outside it, depending on mode."""
     frames = set(frame_list)
     targets = [
         (os.path.join(task_dir, "rgb"), ".jpg"),
@@ -209,6 +225,7 @@ def delete_unused_images(task_dir, frame_list, delete_mode=False):
                     os.remove(f)
 
 def rename_images_continuous(task_dir, total_frames):
+    """Rename remaining images to 000000... after filtering."""
     targets = [
         (os.path.join(task_dir, "rgb"), ".jpg"),
         (os.path.join(task_dir, "depth"), ".png"),
@@ -227,6 +244,7 @@ def rename_images_continuous(task_dir, total_frames):
     print(f"[OK] 图片已重新连续编号：000000 ~ {total_frames-1:06d}")
 
 def process_single_task(task_dir):
+    """Run the full preprocessing pipeline for one task folder."""
     print(f"\n======= 开始处理：{task_dir} =======")
 
     backup_task_folder(task_dir)
@@ -256,6 +274,7 @@ def process_single_task(task_dir):
     print(f"[OK] 任务完成：{task_dir}")
 
 def batch_process_all_tasks():
+    """Process every task under data_process/data."""
     task_dirs = natural_sort(glob.glob(os.path.join(SCRIPT_DIR, "./data/task_*")))
     task_dirs = [d for d in task_dirs if os.path.isdir(d) and "task_copy" not in d]
 

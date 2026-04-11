@@ -1,3 +1,10 @@
+"""Policy wrappers around the ACT/DETR model builders.
+
+The wrappers normalize external image tensors before calling the model and
+compute training losses. Deployment wrappers must mirror the same image and
+qpos normalization rules.
+"""
+
 import torch.nn as nn
 import torch
 from torch.nn import functional as F
@@ -8,6 +15,8 @@ from act.detr.main import build_ACT_model_and_optimizer, build_CNNMLP_model_and_
 # e = IPython.embed
 
 class ACTPolicy(nn.Module):
+    """Main CVAE ACT policy used by this project."""
+
     def __init__(self, args_override, device=None):
         super().__init__()
         model, optimizer = build_ACT_model_and_optimizer(args_override, device=device)
@@ -18,6 +27,7 @@ class ACTPolicy(nn.Module):
         print(f'KL Weight {self.kl_weight}')
 
     def _normalize_tensor(self, image):
+        """Convert OpenCV BGR/BGRA tensors to RGB/RGBD and apply ImageNet stats."""
         channel_count = image.shape[-3]
         if channel_count == 4:
             if image.dim() == 4:
@@ -71,6 +81,7 @@ class ACTPolicy(nn.Module):
         return image
 
     def __call__(self, qpos, image, memory_image=None, actions=None, is_pad=None):
+        """Return a loss dict during training or action chunks during inference."""
         env_state = None
         image = self._normalize_tensor(image)
         image = self._prepare_image_input(image)
@@ -107,6 +118,8 @@ class ACTPolicy(nn.Module):
 
 
 class CNNMLPPolicy(nn.Module):
+    """Legacy policy kept only for old ACT compatibility paths."""
+
     def __init__(self, args_override, device=None):
         super().__init__()
         model, optimizer = build_CNNMLP_model_and_optimizer(args_override, device=device)

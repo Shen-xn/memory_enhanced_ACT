@@ -1,3 +1,10 @@
+"""Segmentation and recurrent memory-image logic for me_block.
+
+The segmentation model predicts background + foreground classes for each
+frame. MemoryImageUpdater then keeps a separate score/image state per
+foreground class and renders one four-channel memory image for ACT.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -21,12 +28,14 @@ def _channel_tensor(values, device, dtype):
 
 
 def normalize_image_channels(images: torch.Tensor, config: ImportanceModelConfig) -> torch.Tensor:
+    """Normalize the selected model input channels with checkpoint config values."""
     mean = _channel_tensor(config.image_mean[: images.shape[1]], images.device, images.dtype)
     std = _channel_tensor(config.image_std[: images.shape[1]], images.device, images.dtype)
     return (images - mean) / std
 
 
 def select_segmentation_input(images: torch.Tensor, config: ImportanceModelConfig) -> torch.Tensor:
+    """Select the channels consumed by segmentation while preserving full input for memory."""
     expected_channels = int(config.segmentation_input_channels)
     if images.shape[1] < expected_channels:
         raise ValueError(
@@ -36,6 +45,7 @@ def select_segmentation_input(images: torch.Tensor, config: ImportanceModelConfi
 
 
 def _adapt_conv_to_input_channels(old_conv: nn.Conv2d, input_channels: int) -> nn.Conv2d:
+    """Reuse pretrained conv weights when the requested input channel count differs."""
     if old_conv.in_channels == input_channels:
         return old_conv
 
@@ -85,6 +95,8 @@ def _load_backbone(builder, weights, name: str):
 
 
 class TruncatedResNet18Layer2Segmentation(nn.Module):
+    """Small fully-convolutional segmentation head built from early ResNet18 layers."""
+
     def __init__(self, config: ImportanceModelConfig):
         super().__init__()
         weights = _resolve_weights(ResNet18_Weights, config.pretrained_backbone, "ResNet18")
@@ -114,6 +126,8 @@ class TruncatedResNet18Layer2Segmentation(nn.Module):
 
 
 class ImportanceSegmentationModel(nn.Module):
+    """Thin wrapper that owns the architecture choice and input-channel selection."""
+
     def __init__(self, config: ImportanceModelConfig):
         super().__init__()
         self.config = config
@@ -131,6 +145,8 @@ class ImportanceSegmentationModel(nn.Module):
 
 @dataclass
 class MemoryStepResult:
+    """All tensors produced by one recurrent memory update step."""
+
     memory_image: torch.Tensor
     memory_state: torch.Tensor
     score_state: torch.Tensor
@@ -141,6 +157,8 @@ class MemoryStepResult:
 
 
 class MemoryImageUpdater(nn.Module):
+    """Deterministic class-wise memory update used offline and in deployment."""
+
     def __init__(self, importance_config: ImportanceModelConfig, memory_config: MemoryUpdateConfig):
         super().__init__()
         self.importance_config = importance_config
@@ -151,6 +169,7 @@ class MemoryImageUpdater(nn.Module):
         return len(self.importance_config.class_names)
 
     def _top_fraction_mask(self, scores: torch.Tensor, keep_ratio: float) -> torch.Tensor:
+        """Keep the highest-scoring fraction of pixels for one foreground class."""
         if keep_ratio <= 0:
             return torch.zeros_like(scores, dtype=torch.bool)
         if keep_ratio >= 1:
@@ -171,6 +190,7 @@ class MemoryImageUpdater(nn.Module):
         prev_memory: Optional[torch.Tensor] = None,
         prev_scores: Optional[torch.Tensor] = None,
     ) -> MemoryStepResult:
+        """Update memory state from current image and foreground probabilities."""
         if current_image.dim() != 4:
             raise ValueError(f"Expected current_image shape [B, C, H, W], got {tuple(current_image.shape)}.")
 
@@ -232,6 +252,8 @@ class MemoryImageUpdater(nn.Module):
             float(self.memory_config.keep_top_ratio_goal),
             float(self.memory_config.keep_top_ratio_arm),
         ]
+        # Render classes in config order. `occupied` prevents later classes from
+        # overwriting pixels already claimed by earlier, higher-priority classes.
         for class_idx in range(self.num_classes):
             keep_ratio = keep_ratios[class_idx] if class_idx < len(keep_ratios) else keep_ratios[-1]
             class_mask = self._top_fraction_mask(score_state[:, class_idx : class_idx + 1], keep_ratio) & (~occupied)
@@ -279,6 +301,7 @@ class ImportanceMemoryModel(nn.Module):
         prev_memory: Optional[torch.Tensor] = None,
         prev_scores: Optional[torch.Tensor] = None,
     ) -> MemoryStepResult:
+        """Predict segmentation probabilities and apply one memory update."""
         logits = self.segmenter(current_image)
         probs = F.softmax(logits, dim=1)
         background_prob = probs[:, :1]

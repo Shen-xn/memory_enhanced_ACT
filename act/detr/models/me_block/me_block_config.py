@@ -11,6 +11,8 @@ DEFAULT_CLASS_NAMES = ["target", "goal", "arm"]
 
 @dataclass
 class ImportanceModelConfig:
+    """Architecture and normalization settings saved inside me_block checkpoints."""
+
     # Changes in this block affect the segmentation model itself.
     # If you change them, train a new checkpoint.
     model_name: str = "truncated_resnet18_layer2"
@@ -34,6 +36,8 @@ class ImportanceModelConfig:
 
 @dataclass
 class MemoryUpdateConfig:
+    """State-update parameters for converting segmentation probabilities to memory."""
+
     # keep_top_ratio_* means "keep the top fraction of pixels by score_state for each class".
     # Example: keep_top_ratio_target=0.05 keeps the top 5% target pixels in each frame.
     score_decay: float = 0.92
@@ -45,6 +49,8 @@ class MemoryUpdateConfig:
 
 @dataclass
 class ImportanceTrainingConfig:
+    """Training-only settings for the importance segmentation model."""
+
     # Data/training settings below are used when you start a new training run.
     # Changing them does not modify an existing checkpoint.
     # If you want the new settings to take effect, train again.
@@ -63,8 +69,12 @@ class ImportanceTrainingConfig:
     batch_size: int = 4
     num_workers: int = 0
     num_epochs: int = 60
-    learning_rate: float = 5e-5
-    weight_decay: float = 1e-4
+    learning_rate: float = 1e-4
+    weight_decay: float = 3e-4
+    lr_scheduler: str = "warmup_cosine"
+    # Warmup prevents early unstable updates; cosine decay keeps late training gentle.
+    warmup_epochs: int = 3
+    min_lr_ratio: float = 0.1
     train_ratio: float = 0.8
     seed: int = 42
     save_root: str = ""
@@ -73,6 +83,8 @@ class ImportanceTrainingConfig:
 
 @dataclass
 class MemoryGenerationConfig:
+    """Path settings used when generating memory_image_four_channel."""
+
     # Output/path settings below are used only when generating memory images.
     # They do not require retraining.
     # generate_memory_images.py still restores the saved generation config from checkpoint first.
@@ -85,6 +97,8 @@ class MemoryGenerationConfig:
 
 @dataclass
 class MEBlockConfig:
+    """Top-level me_block config written to config.json and checkpoint payloads."""
+
     # Quick guide:
     # - importance / training changes -> retrain
     # - memory changes -> no retrain, but regenerate memory images

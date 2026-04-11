@@ -71,13 +71,19 @@ python run_me_block_train_importance.py
 常用参数：
 
 ```powershell
-python run_me_block_train_importance.py --epochs 30 --batch-size 4 --gamma-min 0.6 --gamma-max 1.8 --noise-std 0.02
+python run_me_block_train_importance.py --epochs 60 --batch-size 4 --lr 5e-5 --lr-scheduler warmup_cosine --warmup-epochs 3 --min-lr-ratio 0.1
 ```
 
 只在 train split 上启用的数据增强：
 
 - 随机 gamma：`0.6 ~ 1.8`
 - 高斯噪声：默认 `std = 0.02`
+
+默认学习率调度为 `warmup_cosine`：
+
+- 前 `warmup_epochs` 个 epoch 从较小学习率逐步升到基础学习率
+- 后续按 cosine decay 下降到 `learning_rate * min_lr_ratio`
+- 如果要固定学习率，可以加 `--lr-scheduler none`
 
 ## 正式训练机上的建议流程
 

@@ -7,6 +7,8 @@
 #include <vector>
 
 struct DeployConfig {
+  // Values written by deploy/export_torchscript_models.py. Keep this struct in
+  // sync with deploy_config.yml so the C++ preprocessing matches training.
   int target_width = 640;
   int target_height = 480;
   int pad_left = 0;
@@ -30,6 +32,8 @@ class ActPipeline {
       const std::vector<float>& qpos,
       bool use_me_block = true);
 
+  // Direct BGRA path is useful for tests and for callers that already did
+  // camera/depth preprocessing outside this class.
   std::vector<std::vector<float>> PredictFromFourChannel(
       const cv::Mat& four_channel_bgra,
       const std::vector<float>& qpos,
@@ -45,6 +49,8 @@ class ActPipeline {
   torch::jit::script::Module act_module_;
   torch::jit::script::Module me_block_module_;
   bool me_block_loaded_ = false;
+  // Online me_block state persists across control ticks and is reset by
+  // initialize/stop/emergency-stop in the ROS node.
   torch::Tensor prev_memory_;
   torch::Tensor prev_scores_;
 

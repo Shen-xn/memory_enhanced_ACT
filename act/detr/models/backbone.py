@@ -1,7 +1,5 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-"""
-Backbone modules.
-"""
+"""Backbone modules used by ACT visual encoders."""
 from collections import OrderedDict
 import warnings
 
@@ -59,6 +57,7 @@ class FrozenBatchNorm2d(torch.nn.Module):
 
 
 class BackboneBase(nn.Module):
+    """Wrap a torchvision backbone and expose DETR-style intermediate layers."""
 
     def __init__(self, backbone: nn.Module, train_backbone: bool, num_channels: int, return_interm_layers: bool):
         super().__init__()
@@ -100,6 +99,8 @@ class Backbone(BackboneBase):
         
         # ===================== Four-channel adaptation modification =====================
         if depth_channel:
+            # RGBD models reuse RGB pretrained weights and initialize depth from
+            # the average RGB filter. RGB-only models keep the original conv1.
             old_weight = backbone.conv1.weight.data
             new_conv = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3)
             
@@ -115,6 +116,7 @@ class Backbone(BackboneBase):
 
 
 def build_torchvision_resnet(name, replace_stride_with_dilation, norm_layer, use_pretrained):
+    """Build a ResNet across torchvision versions and offline environments."""
     builder = getattr(torchvision.models, name)
     weights = None
     if use_pretrained:
@@ -162,6 +164,8 @@ def build_torchvision_resnet(name, replace_stride_with_dilation, norm_layer, use
 
 
 class Joiner(nn.Sequential):
+    """Apply backbone and positional encoding as one module."""
+
     def __init__(self, backbone, position_embedding):
         super().__init__(backbone, position_embedding)
 
@@ -178,6 +182,7 @@ class Joiner(nn.Sequential):
 
 
 def build_backbone(args):
+    """Build the visual backbone expected by DETRVAE."""
     position_embedding = build_position_encoding(args)
     train_backbone = args.lr_backbone > 0
     return_interm_layers = getattr(args, "masks", False)

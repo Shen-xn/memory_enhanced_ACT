@@ -5,6 +5,12 @@ import torch
 
 
 class Config:
+    """Single source of truth for ACT training configuration.
+
+    Top-level fields are kept explicit so checkpoint configs remain readable.
+    `refresh_model_params()` mirrors the subset needed by the DETR/ACT builder.
+    """
+
     def __init__(self):
         # ===================== 基础路径 =====================
         self.ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -41,6 +47,9 @@ class Config:
 
         # ===================== 模型参数（显式顶层定义，方便引用） =====================
         self.CAMERA_NAMES = ["gemini"]
+        # Current modes:
+        # - False + DEPTH_CHANNEL=True: RGBD baseline
+        # - True  + DEPTH_CHANNEL=True: RGBD + offline/online memory image
         self.USE_MEMORY_IMAGE_INPUT = False
         self.DEPTH_CHANNEL = True
         self.BACKBONE = "resnet18"

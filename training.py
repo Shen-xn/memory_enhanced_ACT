@@ -1,3 +1,10 @@
+"""ACT training entry point.
+
+The training loop intentionally stays thin: config owns hyperparameters,
+dataloader owns data alignment/normalization, and policy owns model-specific
+loss computation. That separation is important when adding new visual modes.
+"""
+
 import os
 import torch
 import numpy as np
@@ -55,7 +62,7 @@ def prepare_run_config(config):
 
 
 def init_model_and_optimizer(config):
-    """初始化模型和优化器"""
+    """Build the selected policy and return its optimizer."""
     device = get_device(config)
     args_override = {
         "lr": config.LR,
@@ -76,7 +83,7 @@ def init_model_and_optimizer(config):
     return policy, optimizer
 
 def train_one_epoch(model, train_loader, optimizer, epoch, config, logger):
-    """训练一个epoch"""
+    """Train ACT for one epoch and persist aggregate metrics."""
     device = get_device(config)
     model.train()
     train_metrics_list = []
@@ -136,7 +143,7 @@ def train_one_epoch(model, train_loader, optimizer, epoch, config, logger):
     return train_metrics
 
 def validate(model, val_loader, config, logger, epoch, is_obst=False):
-    """验证（区分普通/障碍轨迹）"""
+    """Validate on normal or obstacle trajectories only."""
     device = get_device(config)
     model.eval()
     val_metrics_list = []
@@ -213,6 +220,7 @@ def validate(model, val_loader, config, logger, epoch, is_obst=False):
     return val_metrics
 
 def main():
+    """Run a fresh or resumed ACT experiment."""
     resume_ckpt = prepare_run_config(cfg)
     set_global_seed(cfg.SEED, cfg.USE_CUDA)
 

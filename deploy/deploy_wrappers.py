@@ -1,3 +1,10 @@
+"""TorchScript-friendly wrappers used by deployment export.
+
+Training code normalizes images/qpos before calling ACT. Deployment receives
+raw robot qpos and OpenCV images, so these wrappers reproduce the same
+preprocessing inside the exported TorchScript modules.
+"""
+
 from __future__ import annotations
 
 from typing import Tuple
@@ -13,6 +20,8 @@ def _tensor_1d(values) -> torch.Tensor:
 
 
 class _BaseActInferenceWrapper(nn.Module):
+    """Shared preprocessing for ACT inference wrappers."""
+
     def __init__(self, model: nn.Module, joint_min, joint_rng):
         super().__init__()
         self.model = model.eval()
@@ -28,11 +37,14 @@ class _BaseActInferenceWrapper(nn.Module):
         return actions * self.joint_rng.view(1, 1, -1) + self.joint_min.view(1, 1, -1)
 
     def _normalize_bgra_image(self, image: torch.Tensor) -> torch.Tensor:
+        """Convert BGRA float image to RGBD normalized tensor expected by ACT."""
         image = image[:, [2, 1, 0, 3]]
         return (image - self.image_mean) / self.image_std
 
 
 class ACTSingleImageInferenceWrapper(_BaseActInferenceWrapper):
+    """Export wrapper for baseline ACT: qpos + current image -> action chunk."""
+
     def forward(self, qpos: torch.Tensor, image_bgra: torch.Tensor) -> torch.Tensor:
         qpos = self._normalize_qpos(qpos)
         image = self._normalize_bgra_image(image_bgra).unsqueeze(1)
@@ -41,6 +53,8 @@ class ACTSingleImageInferenceWrapper(_BaseActInferenceWrapper):
 
 
 class ACTDualImageInferenceWrapper(_BaseActInferenceWrapper):
+    """Export wrapper for memory ACT: qpos + image + memory image -> actions."""
+
     def forward(self, qpos: torch.Tensor, image_bgra: torch.Tensor, memory_image_bgra: torch.Tensor) -> torch.Tensor:
         qpos = self._normalize_qpos(qpos)
         image = self._normalize_bgra_image(image_bgra).unsqueeze(1)
@@ -50,6 +64,8 @@ class ACTDualImageInferenceWrapper(_BaseActInferenceWrapper):
 
 
 class MEBlockInferenceWrapper(nn.Module):
+    """Export wrapper for online recurrent memory-image generation."""
+
     def __init__(self, model: ImportanceMemoryModel):
         super().__init__()
         self.model = model.eval()

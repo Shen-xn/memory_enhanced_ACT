@@ -1,3 +1,10 @@
+"""Datasets and image IO helpers for me_block importance training.
+
+Labels are matched to images by file stem. This lets the annotator save
+`importance_labels/000123.png` and the trainer pair it with either
+`rgb/000123.jpg` or `four_channel/000123.png`.
+"""
+
 from __future__ import annotations
 
 import glob
@@ -17,6 +24,7 @@ SPECIAL_TASK_NAME = "special_data"
 
 
 def resolve_task_image_dir(task_dir: str, image_dirname: str = "auto") -> str:
+    """Choose which image folder a task should use for annotation/training."""
     task_name = os.path.basename(os.path.normpath(task_dir))
     four_channel_dir = os.path.join(task_dir, "four_channel")
     rgb_dir = os.path.join(task_dir, "rgb")
@@ -43,6 +51,7 @@ def resolve_task_image_dir(task_dir: str, image_dirname: str = "auto") -> str:
 
 
 def list_task_dirs(data_root: str, image_dirname: str = "auto") -> List[str]:
+    """List task folders that have a usable image directory."""
     candidates = []
     candidates.extend(sorted(glob.glob(os.path.join(data_root, "task*"))))
     special_dir = os.path.join(data_root, "special_data")
@@ -58,6 +67,7 @@ def list_task_dirs(data_root: str, image_dirname: str = "auto") -> List[str]:
 
 
 def list_image_files(image_dir: str) -> List[str]:
+    """Return image files with common extensions in deterministic order."""
     patterns = ("*.png", "*.jpg", "*.jpeg", "*.JPG", "*.JPEG", "*.PNG")
     return sorted({path for pattern in patterns for path in glob.glob(os.path.join(image_dir, pattern))})
 
@@ -81,6 +91,7 @@ def read_rgb_image(path: str) -> np.ndarray:
 
 
 def read_model_input(path: str, image_dirname: str, input_channels: int) -> np.ndarray:
+    """Read an image and adapt it to the configured channel count."""
     if image_dirname == "four_channel":
         image = read_four_channel(path)
     else:
@@ -99,6 +110,7 @@ def read_model_input(path: str, image_dirname: str, input_channels: int) -> np.n
 
 
 def read_label(path: str) -> np.ndarray:
+    """Read one single-channel segmentation label image."""
     label = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if label is None:
         raise RuntimeError(f"Failed to read label: {path}")
@@ -150,6 +162,7 @@ def augment_sample(
     config: ImportanceTrainingConfig,
     unlabeled_index: int,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Apply paired geometric augmentation plus RGB-only photometric jitter."""
     if not config.use_augmentation:
         return image, label
 
@@ -175,6 +188,13 @@ def augment_sample(
 
 
 class ImportanceFrameDataset(Dataset):
+    """Frame-level dataset for importance segmentation.
+
+    The split is task-based rather than frame-based, so validation remains a
+    genuine held-out trajectory set. `special_data` is treated as auxiliary
+    train-only data.
+    """
+
     def __init__(
         self,
         config: ImportanceTrainingConfig,
@@ -190,6 +210,7 @@ class ImportanceFrameDataset(Dataset):
         self.samples = self._load_samples()
 
     def _load_samples(self) -> List[Dict]:
+        """Collect image/label pairs and apply the strict train/val task split."""
         task_dirs = list_task_dirs(self.config.data_root, image_dirname=self.config.image_dirname)
         if not task_dirs:
             raise FileNotFoundError(f"No task folders found under {self.config.data_root}")

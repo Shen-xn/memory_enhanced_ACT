@@ -1,7 +1,15 @@
+"""Train the me_block importance segmentation model.
+
+The model is trained only on segmentation labels. Memory-image recurrence is
+not trained end-to-end here; it is a deterministic post-processing step driven
+by the segmentation probabilities and MemoryUpdateConfig.
+"""
+
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from datetime import datetime
 
@@ -17,6 +25,7 @@ from .memory_gate_model import ImportanceMemoryModel, checkpoint_payload
 
 
 def parse_args(default_data_root: str = "", default_save_root: str = "") -> argparse.Namespace:
+    """Parse CLI overrides while keeping dataclass defaults as the source of truth."""
     parser = argparse.ArgumentParser(description="Train the importance segmentation model used by the memory-image pipeline.")
     parser.add_argument("--data-root", type=str, default=default_data_root, help="Root containing task_* folders.")
     parser.add_argument("--save-root", type=str, default=default_save_root, help="Directory for checkpoints and logs.")
@@ -25,6 +34,15 @@ def parse_args(default_data_root: str = "", default_save_root: str = "") -> argp
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
+    parser.add_argument(
+        "--lr-scheduler",
+        type=str,
+        default=None,
+        choices=["none", "warmup_cosine"],
+        help="Learning-rate schedule for me_block training.",
+    )
+    parser.add_argument("--warmup-epochs", type=int, default=None)
+    parser.add_argument("--min-lr-ratio", type=float, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--gamma-min", type=float, default=None)
     parser.add_argument("--gamma-max", type=float, default=None)
@@ -35,6 +53,7 @@ def parse_args(default_data_root: str = "", default_save_root: str = "") -> argp
 
 
 def resolve_config(args: argparse.Namespace) -> MEBlockConfig:
+    """Merge CLI overrides into the default me_block config for a new run."""
     config = default_me_block_config()
 
     if args.data_root:
@@ -52,6 +71,12 @@ def resolve_config(args: argparse.Namespace) -> MEBlockConfig:
         config.training.learning_rate = args.lr
     if args.weight_decay is not None:
         config.training.weight_decay = args.weight_decay
+    if args.lr_scheduler is not None:
+        config.training.lr_scheduler = args.lr_scheduler
+    if args.warmup_epochs is not None:
+        config.training.warmup_epochs = args.warmup_epochs
+    if args.min_lr_ratio is not None:
+        config.training.min_lr_ratio = args.min_lr_ratio
     if args.seed is not None:
         config.training.seed = args.seed
     if args.gamma_min is not None:
@@ -67,6 +92,7 @@ def resolve_config(args: argparse.Namespace) -> MEBlockConfig:
 
 
 def compute_mean_iou(logits: torch.Tensor, targets: torch.Tensor, num_classes: int, unlabeled_index: int) -> float:
+    """Compute mean IoU over classes that appear in prediction or target."""
     preds = logits.argmax(dim=1)
     valid_mask = targets != unlabeled_index
     if valid_mask.sum().item() == 0:
@@ -90,6 +116,7 @@ def accumulate_foreground_recall_counts(
     num_foreground_classes: int,
     unlabeled_index: int,
 ) -> tuple[list[int], list[int]]:
+    """Accumulate foreground recall counts for target/goal/arm diagnostics."""
     preds = logits.argmax(dim=1)
     true_positive = []
     ground_truth = []
@@ -110,6 +137,7 @@ def run_epoch(
     device: torch.device,
     class_names: list[str],
 ) -> dict:
+    """Run one train or validation epoch and return serializable metrics."""
     is_train = optimizer is not None
     model.train(is_train)
     stage_name = "train" if is_train else "val"
@@ -163,6 +191,7 @@ def run_epoch(
 
 
 def append_metrics(log_path: str, epoch: int, stage: str, metrics: dict) -> None:
+    """Append one JSONL metrics record so interrupted runs stay readable."""
     record = {
         "epoch": epoch,
         "stage": stage,
@@ -182,6 +211,7 @@ def format_per_class_metrics(metrics: dict) -> str:
 
 
 def compute_class_weights(train_loader: DataLoader, num_classes: int, unlabeled_index: int) -> torch.Tensor:
+    """Estimate inverse-frequency class weights from the training labels."""
     class_counts = np.zeros(num_classes, dtype=np.float64)
 
     for _images, labels in train_loader:
@@ -200,7 +230,42 @@ def compute_class_weights(train_loader: DataLoader, num_classes: int, unlabeled_
     return torch.tensor(class_weights, dtype=torch.float32)
 
 
+def build_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    config,
+) -> torch.optim.lr_scheduler.LambdaLR | None:
+    """Build the per-epoch LR schedule used by the importance model."""
+    if config.lr_scheduler == "none":
+        return None
+    if config.lr_scheduler != "warmup_cosine":
+        raise ValueError(f"Unsupported lr_scheduler: {config.lr_scheduler}")
+
+    total_epochs = max(1, int(config.num_epochs))
+    warmup_epochs = max(0, min(int(config.warmup_epochs), total_epochs))
+    min_lr_ratio = float(config.min_lr_ratio)
+    if not 0.0 <= min_lr_ratio <= 1.0:
+        raise ValueError("min_lr_ratio must be in [0, 1].")
+
+    def lr_lambda(epoch_index: int) -> float:
+        # epoch_index is zero-based. During warmup, ramp from a small LR to base LR.
+        if warmup_epochs > 0 and epoch_index < warmup_epochs:
+            return max(min_lr_ratio, float(epoch_index + 1) / float(warmup_epochs))
+
+        decay_epochs = max(1, total_epochs - warmup_epochs)
+        decay_index = min(max(epoch_index - warmup_epochs, 0), decay_epochs)
+        progress = float(decay_index) / float(decay_epochs)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+
+def current_learning_rate(optimizer: torch.optim.Optimizer) -> float:
+    return float(optimizer.param_groups[0]["lr"])
+
+
 def main(default_data_root: str = "", default_save_root: str = "") -> None:
+    """Entry point used by both the module and root-level run script."""
     args = parse_args(default_data_root=default_data_root, default_save_root=default_save_root)
     config = resolve_config(args)
 
@@ -261,14 +326,17 @@ def main(default_data_root: str = "", default_save_root: str = "") -> None:
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
     )
+    scheduler = build_lr_scheduler(optimizer, config.training)
 
     best_miou = -1.0
     metrics_path = os.path.join(save_dir, "metrics.jsonl")
 
     for epoch in range(1, config.training.num_epochs + 1):
-        print(f"Epoch {epoch}/{config.training.num_epochs}")
+        lr = current_learning_rate(optimizer)
+        print(f"Epoch {epoch}/{config.training.num_epochs} | lr={lr:.6g}")
         train_metrics = run_epoch(model, train_loader, criterion, optimizer, device, config.importance.class_names)
         val_metrics = run_epoch(model, val_loader, criterion, None, device, config.importance.class_names)
+        train_metrics["lr"] = lr
 
         print(f"  train loss={train_metrics['loss']:.4f} miou={train_metrics['miou']:.4f}")
         print(f"  val   loss={val_metrics['loss']:.4f} miou={val_metrics['miou']:.4f}")
@@ -285,6 +353,9 @@ def main(default_data_root: str = "", default_save_root: str = "") -> None:
         if val_metrics["miou"] >= best_miou:
             best_miou = val_metrics["miou"]
             torch.save(latest_payload, os.path.join(save_dir, "best_model.pth"))
+
+        if scheduler is not None:
+            scheduler.step()
 
     print(f"Training finished. Outputs saved to: {save_dir}")
 

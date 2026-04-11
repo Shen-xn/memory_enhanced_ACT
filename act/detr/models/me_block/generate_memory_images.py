@@ -1,3 +1,11 @@
+"""Generate offline memory images for ACT training.
+
+The generator replays each task in frame order. It carries `prev_memory` and
+`prev_scores` across frames inside a task, then resets them at the next task.
+The saved `memory_image_four_channel` files keep the same filenames as source
+`four_channel` frames so ACT can align them by basename.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -24,6 +32,7 @@ from .memory_gate_model import ImportanceMemoryModel
 
 
 def parse_args(default_data_root: str = "") -> argparse.Namespace:
+    """Parse CLI options for offline memory-image generation."""
     parser = argparse.ArgumentParser(description="Generate memory_image_four_channel from a trained importance model.")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to best_model.pth or latest_model.pth.")
     parser.add_argument("--data-root", type=str, default=default_data_root, help="Root containing task* folders. Overrides checkpoint config.")
@@ -35,6 +44,7 @@ def parse_args(default_data_root: str = "") -> argparse.Namespace:
 
 
 def load_model_from_checkpoint(path: str, device: torch.device) -> ImportanceMemoryModel:
+    """Restore model weights and config from a me_block checkpoint."""
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     config_payload = checkpoint["config"]
     config = MEBlockConfig(
@@ -54,6 +64,7 @@ def load_model_from_checkpoint(path: str, device: torch.device) -> ImportanceMem
 
 
 def task_output_complete(task_dir: str, config: MemoryGenerationConfig, debug: bool) -> bool:
+    """Check whether a task already has all requested output files."""
     image_dir = os.path.join(task_dir, config.image_dirname)
     output_dir = os.path.join(task_dir, config.output_dirname)
     src_paths = sorted(glob.glob(os.path.join(image_dir, "*.png")))
@@ -83,6 +94,7 @@ def save_png_uint8(path: str, image: np.ndarray) -> None:
 
 
 def collapse_score_for_debug(score_state: torch.Tensor) -> torch.Tensor:
+    """Collapse per-class score state into one debug image."""
     if score_state.size(1) == 1:
         return score_state
     return torch.max(score_state, dim=1, keepdim=True).values
@@ -96,6 +108,7 @@ def clear_png_dir(path: str) -> None:
 
 
 def clear_debug_outputs(task_dir: str, config: MemoryGenerationConfig) -> None:
+    """Remove debug-only artifacts when generating a clean memory-image set."""
     for dirname in (config.save_score_dirname, config.save_mask_dirname, "importance_scores", "write_masks"):
         clear_png_dir(os.path.join(task_dir, dirname))
     meta_path = os.path.join(task_dir, "memory_image_meta.json")
@@ -112,6 +125,7 @@ def generate_for_task(
     force: bool,
     debug: bool,
 ) -> None:
+    """Generate recurrent memory images for one task directory."""
     config = model.config.generation
     image_dir = os.path.join(task_dir, config.image_dirname)
     output_dir = os.path.join(task_dir, config.output_dirname)
@@ -190,6 +204,7 @@ def generate_for_task(
 
 
 def main(default_data_root: str = "") -> None:
+    """Entry point used by both module execution and root-level run script."""
     args = parse_args(default_data_root=default_data_root)
     device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else "cuda")
     model = load_model_from_checkpoint(args.checkpoint, device)

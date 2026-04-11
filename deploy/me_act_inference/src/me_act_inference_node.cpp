@@ -124,6 +124,8 @@ class MeActInferenceNode : public rclcpp::Node {
 
  private:
   struct SyncedFrame {
+    // Store cloned image data so inference is independent of ROS message
+    // lifetimes. `synced_stamp` is the newer RGB/depth stamp for age checks.
     cv::Mat rgb_bgr;
     cv::Mat depth_raw;
     rclcpp::Time rgb_stamp;
@@ -219,6 +221,8 @@ class MeActInferenceNode : public rclcpp::Node {
   }
 
   void OnControlTimer() {
+    // The timer owns the real-time control loop. Services only change state or
+    // reset memory; all motion commands pass through this method.
     if (state_ == RunState::ESTOP || state_ == RunState::IDLE || state_ == RunState::FAULT) {
       return;
     }
@@ -276,6 +280,7 @@ class MeActInferenceNode : public rclcpp::Node {
       const auto infer_started = get_clock()->now();
       std::vector<std::vector<float>> trajectory;
       {
+        // Protect online memory state from concurrent reset services.
         std::lock_guard<std::mutex> lock(pipeline_mutex_);
         trajectory = pipeline_->Predict(frame->rgb_bgr, frame->depth_raw, *qpos, enable_me_block_);
       }
@@ -486,6 +491,7 @@ class MeActInferenceNode : public rclcpp::Node {
   uint64_t tick_id_ = 0;
 
   std::mutex frame_mutex_;
+  // Guards ActPipeline because it owns mutable recurrent me_block state.
   std::mutex pipeline_mutex_;
   std::optional<SyncedFrame> latest_frame_;
   std::mt19937 rng_;

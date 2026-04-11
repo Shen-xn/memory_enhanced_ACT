@@ -32,6 +32,8 @@ std::vector<std::vector<float>> ActPipeline::Predict(
     const cv::Mat& depth,
     const std::vector<float>& qpos,
     bool use_me_block) {
+  // Deployment receives raw BGR and depth. Convert them to the same BGRA
+  // tensor contract used by ACT training before calling the model.
   const cv::Mat four_channel = BuildFourChannelImage(bgr, depth, config_);
   return PredictFromFourChannel(four_channel, qpos, use_me_block);
 }
@@ -51,6 +53,8 @@ std::vector<std::vector<float>> ActPipeline::PredictFromFourChannel(
   if (config_.use_memory_image_input) {
     EnsureMemoryState();
     if (use_me_block && me_block_loaded_) {
+      // me_block returns the rendered memory image plus updated recurrent
+      // state. The state stays in this pipeline until ResetMemory() is called.
       auto outputs = me_block_module_.forward({image_tensor, prev_memory_, prev_scores_}).toTuple();
       memory_tensor = outputs->elements()[0].toTensor();
       prev_memory_ = outputs->elements()[1].toTensor();
@@ -74,6 +78,8 @@ std::vector<std::vector<float>> ActPipeline::PredictFromFourChannel(
 }
 
 void ActPipeline::ResetMemory() {
+  // State shape is [batch, class, channel, height, width] for memory images and
+  // [batch, class, height, width] for scores. Batch is always 1 in deployment.
   prev_memory_ = torch::zeros(
       {1, config_.me_block_num_classes, 4, config_.target_height, config_.target_width},
       torch::TensorOptions().dtype(torch::kFloat32).device(device_));
@@ -142,6 +148,8 @@ cv::Mat ActPipeline::BuildFourChannelImage(const cv::Mat& bgr, const cv::Mat& de
 
   const cv::Mat depth_u8 = NormalizeDepth(depth, config.depth_clip_min, config.depth_clip_max);
   cv::Mat depth_aligned = cv::Mat::zeros(config.target_height, config.target_width, CV_8UC1);
+  // Match data_process_2.py: place normalized depth with left/top padding into
+  // the final RGB-sized frame, cropping any overflow at right/bottom.
   const int copy_w = std::min(depth_u8.cols, config.target_width - config.pad_left);
   const int copy_h = std::min(depth_u8.rows, config.target_height - config.pad_top);
   if (copy_w > 0 && copy_h > 0) {
@@ -159,6 +167,8 @@ cv::Mat ActPipeline::BuildFourChannelImage(const cv::Mat& bgr, const cv::Mat& de
 }
 
 torch::Tensor ActPipeline::MatToTensor(const cv::Mat& image) const {
+  // Clone after from_blob so TorchScript execution never depends on cv::Mat
+  // storage lifetime.
   cv::Mat continuous = image.isContinuous() ? image : image.clone();
   auto tensor = torch::from_blob(
                     continuous.data,

@@ -1,4 +1,13 @@
-"""ACT data loading with fixed joint limits and OpenCV BGRA images."""
+"""
+ACT data loading.
+
+This module is the contract between processed demonstration data and ACT
+training. Keep it conservative:
+- images on disk are OpenCV BGRA four-channel PNGs;
+- `states_filtered.csv` is aligned by its `frame` column, not by truncation;
+- optional memory images may be missing, in which case the sample receives a
+  zero memory image and the loader prints a warning.
+"""
 
 import glob
 import os
@@ -18,6 +27,7 @@ FIXED_JOINT_RNG = FIXED_JOINT_MAX - FIXED_JOINT_MIN
 
 
 def get_fixed_joint_stats():
+    """Return fixed physical joint limits used by training and deployment."""
     return {
         "min": FIXED_JOINT_MIN.copy(),
         "max": FIXED_JOINT_MAX.copy(),
@@ -26,6 +36,7 @@ def get_fixed_joint_stats():
 
 
 def read_bgra_image(path):
+    """Read one normalized OpenCV BGRA image from disk."""
     image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if image is None:
         raise FileNotFoundError(f"Failed to read image: {path}")
@@ -42,6 +53,7 @@ def _preview_values(values, limit=8):
 
 
 def _frame_id_from_path(path, fallback_index):
+    """Extract the numeric frame id used to align images with CSV rows."""
     stem = os.path.splitext(os.path.basename(path))[0]
     if stem.isdigit():
         return int(stem)
@@ -65,6 +77,7 @@ def _index_image_paths_by_frame(paths):
 
 
 def _frame_ids_from_dataframe(df):
+    """Return frame ids from `frame`, falling back to row numbers for old CSVs."""
     if "frame" not in df.columns:
         return np.arange(len(df), dtype=np.int64)
 
@@ -101,6 +114,7 @@ def _warp_bgra(image, angle, scale, tx, ty):
 
 
 def _augment_rgb_channels(image):
+    """Apply photometric augmentation to color channels while preserving depth."""
     rgb = image[:, :, :3]
     depth = image[:, :, 3:]
     gamma = np.random.uniform(0.6, 1.4)
@@ -112,6 +126,7 @@ def _augment_rgb_channels(image):
 
 
 def _source_group_key(task_path):
+    """Group normal and obstacle versions of the same source trajectory together."""
     task_name = os.path.basename(task_path)
     if task_name.startswith("task_obst_"):
         return task_name[len("task_obst_") :]
@@ -121,6 +136,15 @@ def _source_group_key(task_path):
 
 
 class ImitationDataset(Dataset):
+    """Dataset for ACT action-chunk training.
+
+    Each item contains:
+    - current image: [C, H, W]
+    - current normalized qpos: [state_dim]
+    - future normalized actions: [future_steps, state_dim]
+    - memory image: [C, H, W], zero when unavailable
+    - obstacle flag: [1]
+    """
     def __init__(
         self,
         data_root,
@@ -152,6 +176,7 @@ class ImitationDataset(Dataset):
             self._normalize_joints()
 
     def _align_dataframe_and_images(self, task_name, img_paths, df, joint_cols):
+        """Strictly align `states_filtered.csv` with image files by frame id."""
         if not all(c in df.columns for c in joint_cols):
             print(f"{task_name} 缺少关节列，跳过")
             return [], pd.DataFrame()
@@ -195,6 +220,7 @@ class ImitationDataset(Dataset):
         return aligned_img_paths, aligned_df
 
     def _load_all_samples(self):
+        """Scan all task folders and flatten them into frame-level samples."""
         samples = []
         task_dirs = sorted(glob.glob(os.path.join(self.data_root, "task*")))
         task_dirs = [d for d in task_dirs if os.path.isdir(d) and "task_copy" not in d]
@@ -280,6 +306,7 @@ class ImitationDataset(Dataset):
         return samples
 
     def _interleave_samples(self, samples, seed):
+        """Mix tasks without letting one long trajectory dominate each epoch block."""
         grouped = {}
         for sample in samples:
             grouped.setdefault(sample["task"], []).append(sample)
@@ -304,6 +331,7 @@ class ImitationDataset(Dataset):
         return mixed
 
     def _balance_obstacle_ratio(self, samples, seed):
+        """Downsample the larger normal/obstacle bucket when both are present."""
         obst_samples = [sample for sample in samples if sample["obst"]]
         normal_samples = [sample for sample in samples if not sample["obst"]]
         if not obst_samples or not normal_samples:
@@ -316,6 +344,7 @@ class ImitationDataset(Dataset):
         return obst_samples[:keep_count] + normal_samples[:keep_count]
 
     def _split_by_task(self, train_ratio, seed):
+        """Split by source task group to avoid frame-level leakage into validation."""
         task_to_obst = {}
         task_to_group = {}
         for sample in self.all_samples:
@@ -375,6 +404,7 @@ class ImitationDataset(Dataset):
         print(f"{self.mode.upper()} 集样本数：{len(self.samples)}")
 
     def _normalize_joints(self):
+        """Normalize qpos/actions with fixed robot limits, not dataset statistics."""
         jmin = self.joint_min_max["min"]
         jrng = self.joint_min_max["rng"]
         for s in self.samples:
@@ -416,6 +446,7 @@ def get_data_loaders(
     batch_size=8,
     num_workers=0
 ):
+    """Create train/val dataloaders with the same alignment and normalization rules."""
     train_dataset = ImitationDataset(
         data_root,
         future_steps,

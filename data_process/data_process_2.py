@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""
-data_process_2_final.py - 四通道图像生成（新版padding）
+"""Build four-channel BGRA training images from aligned RGB/depth folders.
 
-功能：
-1. 深度图 TOP+LEFT 方向 padding（XY双向）
-2. 自动对齐到 640×480
-3. RGB与深度图合并为RGBA四通道PNG
+Run this after data_process_1.py. It assumes `rgb/` and `depth_normalized/`
+already have the same frame ids and refuses to pair by list position when they
+do not.
 """
 
 import os
@@ -26,17 +24,20 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # ==============================================================
 
 def natural_sort(l):
+    """Sort filenames by embedded numbers instead of lexicographic order."""
     convert = lambda text: int(text) if text.isdigit() else text.lower()
     alphanum_key = lambda key: [convert(c) for c in re.split(r'(\d+)', key)]
     return sorted(l, key=alphanum_key)
 
 def frame_number_from_path(path):
+    """Extract the numeric frame id from a filename."""
     matches = re.findall(r'\d+', os.path.basename(path))
     if not matches:
         raise ValueError(f"文件名没有帧号: {path}")
     return int(matches[0])
 
 def index_frame_files(paths):
+    """Map frame id to path and reject duplicate frame ids."""
     frame_map = {}
     duplicates = []
     for path in natural_sort(paths):
@@ -49,9 +50,7 @@ def index_frame_files(paths):
     return frame_map
 
 def pad_depth_to_target_size(depth_img, target_w, target_h, pad_left, pad_top):
-    """
-    【新版核心】深度图：TOP+LEFT padding → 强制对齐到 target_w × target_h
-    """
+    """Pad/crop depth into the final camera-aligned target size."""
     h, w = depth_img.shape[:2]
 
     # 1. 先按要求 padding left + top
@@ -76,9 +75,7 @@ def pad_depth_to_target_size(depth_img, target_w, target_h, pad_left, pad_top):
     return final
 
 def create_four_channel_image(rgb_path, depth_path, output_path):
-    """
-    创建四通道图像 (RGB + Depth)
-    """
+    """Create one OpenCV BGRA-style image: BGR color channels plus depth."""
     try:
         # 读取RGB
         rgb_img = cv2.imread(rgb_path)
@@ -115,6 +112,7 @@ def create_four_channel_image(rgb_path, depth_path, output_path):
         return False
 
 def process_single_task(task_dir):
+    """Generate four_channel PNGs for one task."""
     task_name = os.path.basename(task_dir)
     print(f"\n======= 处理任务: {task_name} =======")
 
@@ -176,6 +174,7 @@ def process_single_task(task_dir):
     print(f"[OK] 完成: {success}/{n_pairs}")
 
 def batch_process_all_tasks(data_root):
+    """Generate four_channel images for every task under the data root."""
     task_dirs = natural_sort(glob.glob(os.path.join(data_root, "./data/task_*")))
     task_dirs = [d for d in task_dirs if os.path.isdir(d) and "task_copy" not in d]
 
