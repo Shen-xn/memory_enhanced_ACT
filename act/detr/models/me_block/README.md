@@ -115,23 +115,25 @@ python run_me_block_generate_memory_images.py --checkpoint .\log\me_block\import
 
 ## 当前 gate 逻辑
 
-当前分割输出 4 类 softmax 概率。记忆更新只用前景三类算分数：
+当前分割输出 4 类 softmax 概率：background + target/goal/arm。
+
+代码里实际是按三个前景类分别递推，不是先把三类加权合成一个总分。每个前景类的候选分数为：
 
 ```text
-importance_score =
-(0.6 * p(target) + 0.3 * p(goal) + 0.1 * p(arm)) * (1 - p(background))
+candidate_score[class] = p(class) * (1 - p(background))
 ```
 
-然后做递推：
+然后每一类各自做递推：
 
 ```text
-decayed_score = score_decay * prev_score
-write_mask = importance_score > decayed_score + tau_up
+decayed_score[class] = score_decay * prev_score[class]
+write_mask[class] = candidate_score[class] > decayed_score[class] + tau_up
 ```
 
 `memory_state` 是覆盖式更新，不是平均融合。
 
 最终输出 mask 不是固定阈值，而是按类分别保留 `score_state` 最高的前 `keep_top_ratio_target/goal/arm` 像素。
+也就是说，当前 memory state 有三套前景记忆：target、goal、arm。
 
 ## 和 ACT 的关系
 
@@ -141,6 +143,7 @@ write_mask = importance_score > decayed_score + tau_up
 2. 在 ACT 主训练里打开 `USE_MEMORY_IMAGE_INPUT = True`
 
 也就是说，ACT 只把记忆图当第二张输入图使用，不在线执行这里的 segmentation/gate。
+如果某些训练样本找不到对应 `memory_image_four_channel`，ACT dataloader 会报警并用全零 memory 图补齐。
 
 ## 真机部署时的关系
 

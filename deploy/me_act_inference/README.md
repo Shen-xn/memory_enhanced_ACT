@@ -159,6 +159,7 @@ max = [1000, 1000, 1000, 1000, 1000, 700]
 - 如果 memory launch 打开了 `enable_me_block`，但导出目录里没有 `me_block_inference.pt`，节点会直接启动失败
 - baseline 和 memory 版的导出目录不要混用
 - 双图 ACT 必须是重新按当前代码口径训练出来的模型
+- `initialize`、`stop`、`emergency_stop` 都会重置在线 memory state；节点内部会对推理和重置加锁，避免并发访问同一份 memory
 
 ## 你后面自己排查时优先看哪几处
 

@@ -207,7 +207,8 @@ class MeActInferenceNode : public rclcpp::Node {
       frame.depth_raw = depth_cv->image.clone();
       frame.rgb_stamp = rgb_msg->header.stamp;
       frame.depth_stamp = depth_msg->header.stamp;
-      frame.synced_stamp = rgb_msg->header.stamp;
+      frame.synced_stamp =
+          frame.depth_stamp.nanoseconds() > frame.rgb_stamp.nanoseconds() ? frame.depth_stamp : frame.rgb_stamp;
       frame.frame_id = ++frame_counter_;
 
       std::lock_guard<std::mutex> lock(frame_mutex_);
@@ -227,7 +228,10 @@ class MeActInferenceNode : public rclcpp::Node {
       if (now < initialize_until_) {
         return;
       }
-      pipeline_->ResetMemory();
+      {
+        std::lock_guard<std::mutex> lock(pipeline_mutex_);
+        pipeline_->ResetMemory();
+      }
       tick_id_ = 0;
       state_ = RunState::RUNNING;
       RCLCPP_INFO(get_logger(), "Initialization finished. Switching to RUNNING.");
@@ -270,7 +274,11 @@ class MeActInferenceNode : public rclcpp::Node {
 
     try {
       const auto infer_started = get_clock()->now();
-      const auto trajectory = pipeline_->Predict(frame->rgb_bgr, frame->depth_raw, *qpos, enable_me_block_);
+      std::vector<std::vector<float>> trajectory;
+      {
+        std::lock_guard<std::mutex> lock(pipeline_mutex_);
+        trajectory = pipeline_->Predict(frame->rgb_bgr, frame->depth_raw, *qpos, enable_me_block_);
+      }
       const auto infer_finished = get_clock()->now();
       if (trajectory.empty() || trajectory.front().size() != servo_ids_.size()) {
         EnterFault("ACT returned an empty trajectory or wrong action dimension.");
@@ -399,7 +407,10 @@ class MeActInferenceNode : public rclcpp::Node {
       const std::shared_ptr<std_srvs::srv::Trigger::Request>,
       std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
     state_ = RunState::IDLE;
-    pipeline_->ResetMemory();
+    {
+      std::lock_guard<std::mutex> lock(pipeline_mutex_);
+      pipeline_->ResetMemory();
+    }
     next_command_allowed_at_ = get_clock()->now();
     response->success = true;
     response->message = "Inference stopped.";
@@ -409,7 +420,10 @@ class MeActInferenceNode : public rclcpp::Node {
       const std::shared_ptr<std_srvs::srv::Trigger::Request>,
       std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
     state_ = RunState::ESTOP;
-    pipeline_->ResetMemory();
+    {
+      std::lock_guard<std::mutex> lock(pipeline_mutex_);
+      pipeline_->ResetMemory();
+    }
     next_command_allowed_at_ = get_clock()->now();
     response->success = true;
     response->message = "Emergency stop activated. No more motion commands will be sent.";
@@ -422,7 +436,10 @@ class MeActInferenceNode : public rclcpp::Node {
     try {
       const auto pose = SampleInitializationPose();
       PublishServoCommand(pose);
-      pipeline_->ResetMemory();
+      {
+        std::lock_guard<std::mutex> lock(pipeline_mutex_);
+        pipeline_->ResetMemory();
+      }
       next_command_allowed_at_ = get_clock()->now() + rclcpp::Duration::from_seconds(command_duration_ms_ / 1000.0);
       initialize_until_ = get_clock()->now() + rclcpp::Duration::from_seconds((command_duration_ms_ + 300) / 1000.0);
       state_ = RunState::INITIALIZING;
@@ -438,7 +455,10 @@ class MeActInferenceNode : public rclcpp::Node {
 
   void EnterFault(const std::string& reason) {
     state_ = RunState::FAULT;
-    pipeline_->ResetMemory();
+    {
+      std::lock_guard<std::mutex> lock(pipeline_mutex_);
+      pipeline_->ResetMemory();
+    }
     RCLCPP_ERROR(get_logger(), "Entering FAULT state: %s", reason.c_str());
   }
 
@@ -466,6 +486,7 @@ class MeActInferenceNode : public rclcpp::Node {
   uint64_t tick_id_ = 0;
 
   std::mutex frame_mutex_;
+  std::mutex pipeline_mutex_;
   std::optional<SyncedFrame> latest_frame_;
   std::mt19937 rng_;
 

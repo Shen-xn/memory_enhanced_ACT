@@ -105,7 +105,14 @@ task_xxx/
 - `j5`
 - `j10`
 
+推荐同时保留 `frame` 列，并让它和 `four_channel/*.png` 的数字文件名一致。训练 dataloader 会按 `frame` 和图片文件名做严格对齐，不再用“截断到较短长度”的方式凑齐数据。
+
+如果原始 CSV、`rgb/`、`depth/` 有缺帧，先运行 `data_process_1.py` 修正：CSV 缺行时删除对应图片，图片缺失时删除对应 CSV 行；再运行 `data_process_2.py` 重建 `four_channel/`。
+
+双图 ACT 训练时，`memory_image_four_channel` 缺失不会中断训练，dataloader 会打印警告并用全零 memory 图补齐。这用于允许部分任务没有离线 memory 图，但正式实验前建议确认警告数量。
+
 训练/验证按任务目录划分，不是按帧随机划分。
+训练集和验证集严格分开；如果任务数量不足导致任一 split 为空，训练会直接报错。
 
 ## 当前统一口径
 
@@ -251,8 +258,11 @@ ros2 launch me_act_inference me_act_memory.launch.py
 ## 正式训练前的检查清单
 
 - 这次训练出来的 ACT 必须和当前代码口径一致，旧 ACT checkpoint 不建议继续沿用
+- 先用 `data_process_1.py` 同步 `states_clean.csv`、`rgb/`、`depth/`，再用 `data_process_2.py` 生成 `four_channel/`
+- `states_filtered.csv` 的 `frame` 列应和 `four_channel/*.png` 文件名一致
 - `four_channel` 统一按 OpenCV `BGRA` 口径处理
 - 关节归一化统一按固定物理范围，不再按数据集统计
+- 如果双图 ACT 训练时出现 memory 图缺失警告，要确认这是有意使用全零 memory 补齐
 - baseline 导出时不要带 `--me-block-checkpoint`
 - 双图 ACT 导出时必须带 `--me-block-checkpoint`
 - ROS2 launch 里的 `deploy_dir` 要改成目标机器真实路径

@@ -1,26 +1,68 @@
 ### 使用说明
-1. 数据储存：必须在 ./data/task_*_<数字编号>/下储存。原始得到的数据有两个文件夹：depth/ rgb/ 和一个states.csv文件。处理后必须包含four_channel文件夹和states_filtered.csv。
-   
-2. 脚本 csv_process.py把 data/ 目录下的所有格式化数据中的states.csv文件中奇怪的字符数据改方便的state_clean.csv 文件保留在原目录下。
 
-3. 脚本 data_process_1.py 也对 data/ 目录下的所有格式化数据做处理。对没一条数据：先将深度图截断在0-800，然后归一化到0-255，以jpg格式保存到原目录的 depth_normalized 文件夹中。把上一步生成的 state_clean.csv 进行 Savitzky-Golay 滤波器平滑轨迹，然后计算累积欧几里德距离变化，删除变化平缓的帧，具体参数见脚本内。最后删除了轨迹的帧，同时也删除rbg和深度图，以对齐数据一致性。
-注意：对于已经处理好的轨迹数据，会自动跳过该条。
+数据目录放在 `data_process/data/task_*` 下。原始采集数据通常包含：
 
-1. 脚本 rollback.py 用于将 data 下的所有处理后的数据进行回滚，恢复到从 Jetson 采集后刚刚传过来的版本。
-
-2. 脚本 traj_data_analize.py 可以进行轨迹可视化，检查滤波和过滤的效果。
-
-3. 脚本 data_process_2.py 通过对 depth_normalized 中的深度图 padding 的方式，将其改变到640*480分辨率，与另外三通道（RGB）对齐。然后与RGB合并，以四通道图的形式存在同路径的 four_channel 路径下，保留编号顺序。
-
-4. 脚本dataloader用于加载数据集，请先按上述步骤处理后使用get_data_loaders加载数据集。
-示例：
-``` python
-train_loader, val_loader = get_data_loaders(
-        data_root="./data",
-        future_steps=10,
-        batch_size=8,
-        num_workers=0
-        )
+```text
+task_xxx/
+  rgb/
+  depth/
+  states.csv
 ```
-5. TODO：写一个从数据集合中抽取一半轨迹，直接处理four_channel中的图片对其使用遮挡模拟生成算法并在task_obst_*中储存的脚本，必须处理前备份并有备份回复功能。
-6. TODO：写一个利用me_block来处理four_channel的程序，用来生成memory_image_four_channel图像，这对于ACT的训练重要。
+
+训练 ACT 前，任务目录至少应包含：
+
+```text
+task_xxx/
+  four_channel/
+  states_filtered.csv
+```
+
+如果训练双图 ACT，还可以额外包含：
+
+```text
+task_xxx/
+  memory_image_four_channel/
+```
+
+`memory_image_four_channel` 缺失时不会中断训练，dataloader 会报警并用全零 memory 图补齐。
+
+### 处理顺序
+
+1. `csv_process.py`
+
+把 `states.csv` 清洗成 `states_clean.csv`。输出列为：
+
+```text
+frame,j1,j2,j3,j4,j5,j10
+```
+
+2. `data_process_1.py`
+
+先备份任务目录到 `task_copy/`，然后检查并同步 `states_clean.csv`、`rgb/`、`depth/`：
+
+- CSV 缺某些帧时，删除对应的 `rgb/depth/depth_normalized` 图片
+- 图片缺某些帧时，删除对应的 CSV 行
+- 三方按 `frame` 列和文件名数字帧号取交集
+
+随后脚本会生成 `depth_normalized/`，清理坏轨迹行，平滑轨迹，删除运动变化过小的帧，并把保留帧重新编号为连续的 `000000...`。最终输出 `states_filtered.csv`。
+
+3. `data_process_2.py`
+
+按帧号严格匹配 `rgb/` 和 `depth_normalized/`，将它们合成为 `four_channel/*.png`。如果两边帧号不一致，脚本会报错并要求先重新运行 `data_process_1.py`。
+
+4. `data_loader.py`
+
+训练时按 `states_filtered.csv` 的 `frame` 列和 `four_channel/*.png` 文件名严格对齐。不会再通过截断尾部来掩盖错位问题。
+
+### 示例
+
+```python
+train_loader, val_loader = get_data_loaders(
+    data_root="./data",
+    future_steps=10,
+    batch_size=8,
+    num_workers=0,
+)
+```
+
+训练/验证按任务 source group 划分。任一 split 为空时会直接报错。

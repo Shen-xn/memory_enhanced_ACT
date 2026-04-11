@@ -29,7 +29,7 @@ def backup_task_folder(task_dir):
     if os.path.exists(backup_dir):
         return
     shutil.copytree(task_dir, backup_dir, ignore=shutil.ignore_patterns("task_copy"))
-    print(f"✅ 备份完成：{backup_dir}")
+    print(f"[OK] 备份完成：{backup_dir}")
 
 def process_depth_images(task_dir):
     depth_in_dir = os.path.join(task_dir, "depth")
@@ -40,7 +40,7 @@ def process_depth_images(task_dir):
     if not depth_paths:
         return
 
-    print(f"📏 处理深度图：{len(depth_paths)} 张")
+    print(f"[INFO] 处理深度图：{len(depth_paths)} 张")
     for path in tqdm(depth_paths):
         img = np.array(Image.open(path), dtype=np.float32)
         img = np.clip(img, DEPTH_CLIP_MIN, DEPTH_CLIP_MAX)
@@ -49,28 +49,91 @@ def process_depth_images(task_dir):
         out_path = os.path.join(depth_out_dir, os.path.basename(path).replace(".png", ".jpg"))
         Image.fromarray(img).save(out_path, "JPEG")
 
-def check_dataset_consistency(task_dir):
+def frame_number_from_path(path):
+    matches = re.findall(r"\d+", os.path.basename(path))
+    if not matches:
+        raise ValueError(f"文件名没有帧号: {path}")
+    return int(matches[0])
+
+def index_frame_files(img_dir, pattern):
+    frame_map = {}
+    duplicates = []
+    for path in natural_sort(glob.glob(os.path.join(img_dir, pattern))):
+        frame_id = frame_number_from_path(path)
+        if frame_id in frame_map:
+            duplicates.append(frame_id)
+        frame_map[frame_id] = path
+    if duplicates:
+        raise ValueError(f"{img_dir} 存在重复帧号: {duplicates[:10]}")
+    return frame_map
+
+def sync_raw_images_with_csv(task_dir):
+    """
+    以 states_clean.csv 的 frame 列、rgb 文件名、depth 文件名三方交集为准。
+    - CSV 缺行：删除对应 rgb/depth/depth_normalized 图片
+    - 图片缺失：删除对应 CSV 行
+    这样后续不会因为简单截断导致图像和关节错位。
+    """
     rgb_dir = os.path.join(task_dir, "rgb")
     depth_dir = os.path.join(task_dir, "depth")
     csv_path = os.path.join(task_dir, "states_clean.csv")
 
     if not os.path.exists(rgb_dir) or not os.path.exists(depth_dir) or not os.path.exists(csv_path):
-        print(f"❌ 【警告】{task_dir} 缺少关键文件夹/文件，跳过！")
+        print(f"[WARN] {task_dir} 缺少关键文件夹/文件，跳过！")
         return False
 
-    rgb_num = len(natural_sort(glob.glob(os.path.join(rgb_dir, "*.jpg"))))
-    depth_num = len(natural_sort(glob.glob(os.path.join(depth_dir, "*.png"))))
-    csv_df = pd.read_csv(csv_path)
-    csv_num = len(csv_df)
+    try:
+        rgb_map = index_frame_files(rgb_dir, "*.jpg")
+        depth_map = index_frame_files(depth_dir, "*.png")
+        csv_df = pd.read_csv(csv_path)
+    except Exception as exc:
+        print(f"[WARN] {task_dir} 一致性检查失败：{exc}")
+        return False
 
-    if rgb_num == depth_num == csv_num:
-        print(f"✅ 数据匹配：总帧数 {rgb_num}")
-        return True
+    if "frame" not in csv_df.columns:
+        print("[WARN] states_clean.csv 没有 frame 列，按行号补 frame。")
+        csv_df.insert(0, "frame", list(range(len(csv_df))))
+
+    frame_values = pd.to_numeric(csv_df["frame"], errors="coerce")
+    if frame_values.isnull().any():
+        bad_rows = frame_values[frame_values.isnull()].index.tolist()
+        print(f"[WARN] CSV frame 列有非数字值，行号：{bad_rows[:10]}，跳过！")
+        return False
+
+    csv_df["frame"] = frame_values.astype(int)
+    csv_frames = set(csv_df["frame"].tolist())
+    rgb_frames = set(rgb_map.keys())
+    depth_frames = set(depth_map.keys())
+    common_frames = csv_frames & rgb_frames & depth_frames
+
+    if not common_frames:
+        print("[WARN] CSV/RGB/Depth 没有任何共同帧，跳过！")
+        return False
+
+    extra_image_frames = (rgb_frames | depth_frames) - common_frames
+    dropped_csv_frames = csv_frames - common_frames
+    changed = False
+
+    if extra_image_frames:
+        delete_unused_images(task_dir, common_frames, delete_mode=False)
+        changed = True
+        print(f"[FIX] CSV 缺行或图像不成对，已删除多余图片帧：{sorted(extra_image_frames)[:20]}")
+
+    if dropped_csv_frames:
+        csv_df = csv_df[csv_df["frame"].isin(common_frames)].reset_index(drop=True)
+        csv_df.to_csv(csv_path, index=False)
+        changed = True
+        print(f"[FIX] 图片缺失，已删除 CSV 行帧：{sorted(dropped_csv_frames)[:20]}")
+
+    if changed:
+        rgb_num = len(index_frame_files(rgb_dir, "*.jpg"))
+        depth_num = len(index_frame_files(depth_dir, "*.png"))
+        csv_num = len(pd.read_csv(csv_path))
+        print(f"[OK] 已修正数据对齐：RGB={rgb_num} | Depth={depth_num} | 轨迹={csv_num}")
     else:
-        print(f"❌ 【警告】{task_dir} 数据不匹配！")
-        print(f"   - RGB: {rgb_num} | Depth: {depth_num} | 轨迹: {csv_num}")
-        print(f"   跳过此任务！\n")
-        return False
+        print(f"[OK] 数据匹配：总帧数 {len(common_frames)}")
+
+    return True
 
 def clean_bad_rows_in_trajectory(df, task_dir):
     joint_cols = [c for c in df.columns if c != "frame"]
@@ -84,11 +147,11 @@ def clean_bad_rows_in_trajectory(df, task_dir):
     if len(bad_indices) == 0:
         return df
 
-    print(f"⚠️  发现 {len(bad_indices)} 行坏数据（空/NaN/inf），帧号：{bad_indices}")
+    print(f"[WARN] 发现 {len(bad_indices)} 行坏数据（空/NaN/inf），帧号：{bad_indices}")
     df_clean = df[~bad_mask].reset_index(drop=True)
     deleted_frames = df.loc[bad_mask, "frame"].tolist()
     delete_unused_images(task_dir, deleted_frames, delete_mode=True)
-    print(f"✅ 已删除坏帧图片：{deleted_frames}")
+    print(f"[OK] 已删除坏帧图片：{deleted_frames}")
     return df_clean
 
 def smooth_trajectory(df):
@@ -120,7 +183,7 @@ def filter_trajectory(df):
     filtered_df = df[keep_mask].reset_index(drop=True)
     filtered_df["original_frame"] = df.loc[keep_mask, "frame"].values
     deleted = len(df) - len(filtered_df)
-    print(f"✂️ 轨迹过滤：保留 {len(filtered_df)} 帧，删除 {deleted} 帧")
+    print(f"[INFO] 轨迹过滤：保留 {len(filtered_df)} 帧，删除 {deleted} 帧")
     return filtered_df
 
 def delete_unused_images(task_dir, frame_list, delete_mode=False):
@@ -161,15 +224,16 @@ def rename_images_continuous(task_dir, total_frames):
             new_path = os.path.join(img_dir, new_name)
             if path != new_path:
                 os.rename(path, new_path)
-    print(f"✅ 图片已重新连续编号：000000 ~ {total_frames-1:06d}")
+    print(f"[OK] 图片已重新连续编号：000000 ~ {total_frames-1:06d}")
 
 def process_single_task(task_dir):
     print(f"\n======= 开始处理：{task_dir} =======")
 
-    if not check_dataset_consistency(task_dir):
+    backup_task_folder(task_dir)
+
+    if not sync_raw_images_with_csv(task_dir):
         return
 
-    backup_task_folder(task_dir)
     process_depth_images(task_dir)
 
     csv_path = os.path.join(task_dir, "states_clean.csv")
@@ -189,21 +253,21 @@ def process_single_task(task_dir):
     if os.path.exists(csv_path):
         os.remove(csv_path)
 
-    print(f"🎉 任务完成：{task_dir}")
+    print(f"[OK] 任务完成：{task_dir}")
 
 def batch_process_all_tasks():
     task_dirs = natural_sort(glob.glob(os.path.join(SCRIPT_DIR, "./data/task_*")))
     task_dirs = [d for d in task_dirs if os.path.isdir(d) and "task_copy" not in d]
 
     if not task_dirs:
-        print("❌ 未找到 task_* 文件夹")
+        print("[WARN] 未找到 task_* 文件夹")
         return
 
-    print(f"🚀 找到 {len(task_dirs)} 个任务，开始批量处理...")
+    print(f"[INFO] 找到 {len(task_dirs)} 个任务，开始批量处理...")
     for td in task_dirs:
         process_single_task(td)
 
-    print("\n🎉🎉🎉 全部任务处理完成！")
+    print("\n[OK] 全部任务处理完成！")
 
 if __name__ == "__main__":
     batch_process_all_tasks()

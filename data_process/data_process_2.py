@@ -12,8 +12,6 @@ import os
 import glob
 import cv2
 import numpy as np
-from PIL import Image
-import shutil
 import re
 
 # ====================== 【全局Padding参数】======================
@@ -31,6 +29,24 @@ def natural_sort(l):
     convert = lambda text: int(text) if text.isdigit() else text.lower()
     alphanum_key = lambda key: [convert(c) for c in re.split(r'(\d+)', key)]
     return sorted(l, key=alphanum_key)
+
+def frame_number_from_path(path):
+    matches = re.findall(r'\d+', os.path.basename(path))
+    if not matches:
+        raise ValueError(f"文件名没有帧号: {path}")
+    return int(matches[0])
+
+def index_frame_files(paths):
+    frame_map = {}
+    duplicates = []
+    for path in natural_sort(paths):
+        frame_id = frame_number_from_path(path)
+        if frame_id in frame_map:
+            duplicates.append(frame_id)
+        frame_map[frame_id] = path
+    if duplicates:
+        raise ValueError(f"存在重复帧号: {duplicates[:10]}")
+    return frame_map
 
 def pad_depth_to_target_size(depth_img, target_w, target_h, pad_left, pad_top):
     """
@@ -107,7 +123,7 @@ def process_single_task(task_dir):
     output_dir = os.path.join(task_dir, "four_channel")
 
     if not os.path.exists(rgb_dir) or not os.path.exists(depth_dir):
-        print(f"❌ 缺少目录")
+        print("[WARN] 缺少目录")
         return
 
     os.makedirs(output_dir, exist_ok=True)
@@ -116,45 +132,66 @@ def process_single_task(task_dir):
     depth_files = natural_sort(glob.glob(os.path.join(depth_dir, "*.jpg")))
 
     if not rgb_files or not depth_files:
-        print(f"❌ 无图像文件")
+        print("[WARN] 无图像文件")
         return
 
-    n_pairs = min(len(rgb_files), len(depth_files))
+    try:
+        rgb_map = index_frame_files(rgb_files)
+        depth_map = index_frame_files(depth_files)
+    except ValueError as exc:
+        print(f"[WARN] 帧号检查失败: {exc}")
+        return
+
+    rgb_frames = set(rgb_map.keys())
+    depth_frames = set(depth_map.keys())
+    if rgb_frames != depth_frames:
+        print("[WARN] RGB 与 depth_normalized 帧号不一致，请先运行 data_process_1.py 修正。")
+        print(f"   RGB 多出: {sorted(rgb_frames - depth_frames)[:20]}")
+        print(f"   Depth 多出: {sorted(depth_frames - rgb_frames)[:20]}")
+        return
+
+    frame_ids = sorted(rgb_frames)
+    existing_outputs = {
+        frame_number_from_path(path): path
+        for path in glob.glob(os.path.join(output_dir, "*.png"))
+    }
+    for frame_id, path in existing_outputs.items():
+        if frame_id not in rgb_frames:
+            os.remove(path)
+
+    n_pairs = len(frame_ids)
     success = 0
 
-    for i in range(n_pairs):
-        rgb_p = rgb_files[i]
-        depth_p = depth_files[i]
-
-        # 帧号匹配
-        f_num = re.findall(r'\d+', os.path.basename(rgb_p))[0]
-        out_p = os.path.join(output_dir, f"{int(f_num):06d}.png")
+    for i, frame_id in enumerate(frame_ids):
+        rgb_p = rgb_map[frame_id]
+        depth_p = depth_map[frame_id]
+        out_p = os.path.join(output_dir, f"{frame_id:06d}.png")
 
         if create_four_channel_image(rgb_p, depth_p, out_p):
             success += 1
 
         if (i+1) % 50 == 0 or (i+1) == n_pairs:
-            print(f"  进度: {i+1}0{n_pairs}  成功:{success}")
+            print(f"  进度: {i+1}/{n_pairs}  成功:{success}")
 
-    print(f"✅ 完成: {success}/{n_pairs}")
+    print(f"[OK] 完成: {success}/{n_pairs}")
 
 def batch_process_all_tasks(data_root):
     task_dirs = natural_sort(glob.glob(os.path.join(data_root, "./data/task_*")))
     task_dirs = [d for d in task_dirs if os.path.isdir(d) and "task_copy" not in d]
 
     if not task_dirs:
-        print("❌ 未找到 task_*")
+        print("[WARN] 未找到 task_*")
         return
 
-    print(f"🚀 找到 {len(task_dirs)} 个任务")
-    print(f"📏 目标尺寸: {TARGET_WIDTH}×{TARGET_HEIGHT}")
-    print(f"🧩 Padding: 左{PAD_LEFT}px, 上{PAD_TOP}px")
+    print(f"[INFO] 找到 {len(task_dirs)} 个任务")
+    print(f"[INFO] 目标尺寸: {TARGET_WIDTH}×{TARGET_HEIGHT}")
+    print(f"[INFO] Padding: 左{PAD_LEFT}px, 上{PAD_TOP}px")
     print("="*60)
 
     for td in task_dirs:
         process_single_task(td)
 
-    print("\n🎉🎉🎉 全部生成完成！")
+    print("\n[OK] 全部生成完成！")
 
 
 if __name__ == "__main__":

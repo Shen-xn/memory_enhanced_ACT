@@ -55,6 +55,7 @@ python deploy/export_torchscript_models.py `
 - 双图 ACT 必须带 `--me-block-checkpoint`
 - 双图 ACT 的 checkpoint 必须是 `USE_MEMORY_IMAGE_INPUT = True` 训练出来的
 - 当前部署链里，双图 ACT 的 `memory_image` 由在线 `me_block` 生成，不再额外读取离线 PNG
+- `--smoke-test` 会按导出的 `me_block_num_classes` 创建 memory state，不再假定只有固定 3 个前景类
 
 ## 换到正式训练机后怎么做
 
@@ -98,3 +99,4 @@ deploy/me_act_inference/
 - Jetson 上 launch 文件里的 `deploy_dir` 指向真实路径
 - baseline 和 memory 版不要混用目录
 - 如果打开了 `enable_me_block`，导出目录里必须真的有 `me_block_inference.pt`
+- ROS2 节点的 `initialize/stop/emergency_stop` 会重置在线 memory state；节点内部已经对推理和重置加锁，避免服务回调和控制 tick 并发改同一份 memory

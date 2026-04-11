@@ -196,11 +196,14 @@ def validate(model, val_loader, config, logger, epoch, is_obst=False):
             val_metrics_list.append(batch_metrics)
             pbar.set_postfix(**batch_metrics)
     
-    # 聚合验证指标
     if len(val_metrics_list) == 0:
-        val_metrics = {k: 0.0 for k in ["loss"] + (["l1", "kl"] if config.POLICY_CLASS == "ACTPolicy" else ["mse"])}
-    else:
-        val_metrics = aggregate_metrics(val_metrics_list)
+        stage = "val_obst" if is_obst else "val"
+        raise ValueError(
+            f"{stage} 没有可验证样本。请检查 train/val 任务划分，以及验证集中是否包含对应类型轨迹。"
+        )
+
+    # 聚合验证指标
+    val_metrics = aggregate_metrics(val_metrics_list)
     
     # 打印日志
     stage = "val_obst" if is_obst else "val"

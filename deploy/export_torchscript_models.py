@@ -206,10 +206,11 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
         "act_output_path": act_output_path,
         "use_memory_image_input": use_memory_image_input,
         "has_me_block": has_me_block,
+        "me_block_num_classes": int(num_me_classes),
     }
 
 
-def smoke_test(output_dir: str, use_memory_image_input: bool, has_me_block: bool) -> None:
+def smoke_test(output_dir: str, use_memory_image_input: bool, has_me_block: bool, me_block_num_classes: int) -> None:
     act_module = torch.jit.load(str(Path(output_dir) / "act_inference.pt"), map_location="cpu").eval()
     qpos = torch.zeros(1, 6)
     image = torch.zeros(1, 4, TARGET_HEIGHT, TARGET_WIDTH)
@@ -224,8 +225,8 @@ def smoke_test(output_dir: str, use_memory_image_input: bool, has_me_block: bool
         me_block = torch.jit.load(str(Path(output_dir) / "me_block_inference.pt"), map_location="cpu").eval()
         memory_image, memory_state, score_state = me_block(
             image,
-            torch.zeros(1, 3, 4, TARGET_HEIGHT, TARGET_WIDTH),
-            torch.zeros(1, 3, TARGET_HEIGHT, TARGET_WIDTH),
+            torch.zeros(1, me_block_num_classes, 4, TARGET_HEIGHT, TARGET_WIDTH),
+            torch.zeros(1, me_block_num_classes, TARGET_HEIGHT, TARGET_WIDTH),
         )
         print(f"[smoke] me_block outputs: memory_image={tuple(memory_image.shape)}, memory_state={tuple(memory_state.shape)}, score_state={tuple(score_state.shape)}")
 
@@ -242,6 +243,7 @@ def main() -> None:
             output_dir=result["output_dir"],
             use_memory_image_input=result["use_memory_image_input"],
             has_me_block=result["has_me_block"],
+            me_block_num_classes=result["me_block_num_classes"],
         )
 
 

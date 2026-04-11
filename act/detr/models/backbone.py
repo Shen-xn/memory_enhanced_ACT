@@ -3,6 +3,7 @@
 Backbone modules.
 """
 from collections import OrderedDict
+import warnings
 
 import torch
 import torch.nn.functional as F
@@ -90,9 +91,12 @@ class Backbone(BackboneBase):
                  return_interm_layers: bool,
                  dilation: bool,
                  depth_channel: bool):
-        backbone = getattr(torchvision.models, name)(
+        backbone = build_torchvision_resnet(
+            name,
             replace_stride_with_dilation=[False, False, dilation],
-            pretrained=is_main_process(), norm_layer=FrozenBatchNorm2d) # pretrained # TODO do we want frozen batch_norm??
+            norm_layer=FrozenBatchNorm2d,
+            use_pretrained=is_main_process(),
+        )
         
         # ===================== Four-channel adaptation modification =====================
         if depth_channel:
@@ -108,6 +112,53 @@ class Backbone(BackboneBase):
         
         num_channels = 512 if name in ('resnet18', 'resnet34') else 2048
         super().__init__(backbone, train_backbone, num_channels, return_interm_layers)
+
+
+def build_torchvision_resnet(name, replace_stride_with_dilation, norm_layer, use_pretrained):
+    builder = getattr(torchvision.models, name)
+    weights = None
+    if use_pretrained:
+        weights_name = {
+            "resnet18": "ResNet18_Weights",
+            "resnet34": "ResNet34_Weights",
+            "resnet50": "ResNet50_Weights",
+            "resnet101": "ResNet101_Weights",
+        }.get(name)
+        weights_enum = getattr(torchvision.models, weights_name, None) if weights_name else None
+        if weights_enum is not None:
+            weights = weights_enum.DEFAULT
+
+    try:
+        try:
+            return builder(
+                replace_stride_with_dilation=replace_stride_with_dilation,
+                weights=weights,
+                norm_layer=norm_layer,
+            )
+        except TypeError:
+            return builder(
+                replace_stride_with_dilation=replace_stride_with_dilation,
+                pretrained=bool(use_pretrained),
+                norm_layer=norm_layer,
+            )
+    except Exception as exc:
+        if not use_pretrained:
+            raise
+        warnings.warn(
+            f"Failed to load pretrained {name} weights ({exc}). Falling back to random initialization."
+        )
+        try:
+            return builder(
+                replace_stride_with_dilation=replace_stride_with_dilation,
+                weights=None,
+                norm_layer=norm_layer,
+            )
+        except TypeError:
+            return builder(
+                replace_stride_with_dilation=replace_stride_with_dilation,
+                pretrained=False,
+                norm_layer=norm_layer,
+            )
 
 
 class Joiner(nn.Sequential):

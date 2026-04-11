@@ -3,6 +3,7 @@
 import glob
 import os
 import random
+import re
 
 import cv2
 import numpy as np
@@ -31,6 +32,47 @@ def read_bgra_image(path):
     if image.ndim != 3 or image.shape[2] != 4:
         raise ValueError(f"Expected a 4-channel image, got shape {image.shape} from {path}")
     return image.astype(np.float32) / 255.0
+
+
+def _preview_values(values, limit=8):
+    values = sorted(values)
+    shown = values[:limit]
+    suffix = "..." if len(values) > limit else ""
+    return f"{shown}{suffix}"
+
+
+def _frame_id_from_path(path, fallback_index):
+    stem = os.path.splitext(os.path.basename(path))[0]
+    if stem.isdigit():
+        return int(stem)
+    match = re.search(r"\d+", stem)
+    if match:
+        return int(match.group(0))
+    return int(fallback_index)
+
+
+def _index_image_paths_by_frame(paths):
+    frame_to_path = {}
+    duplicates = []
+    for fallback_index, path in enumerate(paths):
+        frame_id = _frame_id_from_path(path, fallback_index)
+        if frame_id in frame_to_path:
+            duplicates.append(frame_id)
+        frame_to_path[frame_id] = path
+    if duplicates:
+        raise ValueError(f"Duplicate image frame ids found: {_preview_values(duplicates)}")
+    return frame_to_path
+
+
+def _frame_ids_from_dataframe(df):
+    if "frame" not in df.columns:
+        return np.arange(len(df), dtype=np.int64)
+
+    frame_values = pd.to_numeric(df["frame"], errors="coerce")
+    if frame_values.isnull().any():
+        bad_rows = frame_values[frame_values.isnull()].index.tolist()
+        raise ValueError(f"CSV frame column contains non-numeric values at rows {_preview_values(bad_rows)}")
+    return frame_values.astype(np.int64).to_numpy()
 
 
 def _sample_shared_affine():
@@ -109,6 +151,49 @@ class ImitationDataset(Dataset):
         if normalize_joints:
             self._normalize_joints()
 
+    def _align_dataframe_and_images(self, task_name, img_paths, df, joint_cols):
+        if not all(c in df.columns for c in joint_cols):
+            print(f"{task_name} 缺少关节列，跳过")
+            return [], pd.DataFrame()
+
+        bad_mask = df[joint_cols].isnull().any(axis=1)
+        if bad_mask.any():
+            bad_frame_ids = _frame_ids_from_dataframe(df.loc[bad_mask])
+            raise ValueError(
+                f"{task_name} 的 states_filtered.csv 存在空/NaN 关节行，帧号 {_preview_values(bad_frame_ids.tolist())}。"
+                "请先运行数据预处理同步删除对应图片，再训练。"
+            )
+
+        try:
+            frame_to_image = _index_image_paths_by_frame(img_paths)
+            frame_ids = _frame_ids_from_dataframe(df)
+        except ValueError as exc:
+            raise ValueError(f"{task_name} 帧编号解析失败: {exc}") from exc
+
+        if len(set(frame_ids.tolist())) != len(frame_ids):
+            duplicated = pd.Series(frame_ids).value_counts()
+            duplicated = duplicated[duplicated > 1].index.tolist()
+            raise ValueError(f"{task_name} 的 CSV frame 有重复值: {_preview_values(duplicated)}")
+
+        image_frames = set(frame_to_image.keys())
+        csv_frames = set(int(x) for x in frame_ids)
+        missing_images = csv_frames - image_frames
+        extra_images = image_frames - csv_frames
+
+        if self.strict_alignment and (missing_images or extra_images):
+            raise ValueError(
+                f"{task_name} 的 four_channel 与 states_filtered.csv 不一致。"
+                f"CSV 有但图片缺失: {_preview_values(missing_images)}；"
+                f"图片有但 CSV 缺失: {_preview_values(extra_images)}。"
+                "请先运行 data_process_1.py 修正 rgb/depth/csv，再运行 data_process_2.py 重建 four_channel。"
+            )
+
+        keep_mask = [int(frame_id) in frame_to_image for frame_id in frame_ids]
+        aligned_df = df.loc[keep_mask].reset_index(drop=True)
+        aligned_frame_ids = frame_ids[keep_mask]
+        aligned_img_paths = [frame_to_image[int(frame_id)] for frame_id in aligned_frame_ids]
+        return aligned_img_paths, aligned_df
+
     def _load_all_samples(self):
         samples = []
         task_dirs = sorted(glob.glob(os.path.join(self.data_root, "task*")))
@@ -140,42 +225,38 @@ class ImitationDataset(Dataset):
                 print(f"{task_name} 无四通道图像，跳过")
                 continue
 
-            if self.strict_alignment and len(img_paths) != len(df):
-                print(f"{task_name} 图像与轨迹帧数不匹配，跳过")
+            joint_cols = ["j1", "j2", "j3", "j4", "j5", "j10"]
+            try:
+                img_paths, df = self._align_dataframe_and_images(task_name, img_paths, df, joint_cols)
+            except ValueError as exc:
+                if self.strict_alignment:
+                    raise
+                print(f"{exc}，跳过")
                 continue
 
             n_frames = min(len(img_paths), len(df))
-            img_paths = img_paths[:n_frames]
-            df = df.head(n_frames).reset_index(drop=True)
-
-            if df.isnull().any().any():
-                df = df.dropna().reset_index(drop=True)
-                n_frames = len(df)
-                img_paths = img_paths[:n_frames]
-
-            joint_cols = ["j1", "j2", "j3", "j4", "j5", "j10"]
-            if not all(c in df.columns for c in joint_cols):
-                print(f"{task_name} 缺少关节列，跳过")
-                continue
-
             max_idx = n_frames - self.future_steps
             if max_idx <= 0:
                 print(f"{task_name} 帧数不足，跳过")
                 continue
 
             is_obstacle = "obst" in task_name.lower()
+            missing_memory_count = 0
 
             for i in range(max_idx):
                 # --------------------- 拼接 memory 图像路径（严格同编号） ---------------------
                 mem_img_path = ""
                 if has_memory_folder:
-                    frame_filename = f"{i:06d}.png"  # 按你的命名规则：000000.png
+                    frame_filename = os.path.basename(img_paths[i])
                     mem_img_path = os.path.join(mem_img_dir, frame_filename)
+                has_mem_img = os.path.exists(mem_img_path)
+                if self.use_memory_image_input and not has_mem_img:
+                    missing_memory_count += 1
 
                 sample = {
                     "img_path": img_paths[i],
                     "mem_img_path": mem_img_path,
-                    "has_mem_img": os.path.exists(mem_img_path),
+                    "has_mem_img": has_mem_img,
                     "curr": df.iloc[i][joint_cols].values.astype(np.float32),
                     "future": df.iloc[i+1 : i+1+self.future_steps][joint_cols].values.astype(np.float32),
                     "task": task_dir,
@@ -183,19 +264,20 @@ class ImitationDataset(Dataset):
                 }
                 samples.append(sample)
 
+            if self.use_memory_image_input and missing_memory_count:
+                if has_memory_folder:
+                    print(
+                        f"[WARN] {task_name}: {missing_memory_count} 个样本缺少 memory_image_four_channel，"
+                        "训练时会用全零 memory 图补齐。"
+                    )
+                else:
+                    print(
+                        f"[WARN] {task_name}: 未找到 memory_image_four_channel，"
+                        "该任务训练时会用全零 memory 图补齐。"
+                    )
+
         print(f"总有效样本数：{len(samples)}")
         return samples
-
-    def _split_grouped_tasks(self, task_paths, train_ratio, seed):
-        task_paths = sorted(task_paths)
-        if len(task_paths) <= 1:
-            return set(task_paths), set()
-
-        shuffled = task_paths[:]
-        random.Random(seed).shuffle(shuffled)
-        split_idx = int(len(shuffled) * train_ratio)
-        split_idx = max(1, min(len(shuffled) - 1, split_idx))
-        return set(shuffled[:split_idx]), set(shuffled[split_idx:])
 
     def _interleave_samples(self, samples, seed):
         grouped = {}
@@ -248,12 +330,14 @@ class ImitationDataset(Dataset):
         rng = random.Random(seed)
         rng.shuffle(group_keys)
         if len(group_keys) <= 1:
-            train_groups, val_groups = set(group_keys), set()
-        else:
-            split_idx = int(len(group_keys) * train_ratio)
-            split_idx = max(1, min(len(group_keys) - 1, split_idx))
-            train_groups = set(group_keys[:split_idx])
-            val_groups = set(group_keys[split_idx:])
+            raise ValueError(
+                f"需要至少 2 个 source group 才能严格划分 train/val；当前只有 {len(group_keys)} 个。"
+            )
+
+        split_idx = int(len(group_keys) * train_ratio)
+        split_idx = max(1, min(len(group_keys) - 1, split_idx))
+        train_groups = set(group_keys[:split_idx])
+        val_groups = set(group_keys[split_idx:])
 
         train_tasks = {task for group in train_groups for task in grouped_tasks[group]}
         val_tasks = {task for group in val_groups for task in grouped_tasks[group]}
@@ -284,6 +368,9 @@ class ImitationDataset(Dataset):
             f"Source groups | train={train_group_count} | val={val_group_count} | "
             f"{self.mode} samples obst={sample_obst_count}, normal={len(self.samples) - sample_obst_count}"
         )
+
+        if not self.samples:
+            raise ValueError(f"{self.mode.upper()} split 为空，请检查任务数量、train_ratio 和障碍/普通轨迹分布。")
 
         print(f"{self.mode.upper()} 集样本数：{len(self.samples)}")
 

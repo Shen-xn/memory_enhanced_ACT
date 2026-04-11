@@ -226,9 +226,15 @@ class ImportanceFrameDataset(Dataset):
         primary_tasks = [task_dir for task_dir in eligible_tasks if os.path.basename(task_dir).startswith("task")]
         auxiliary_tasks = [task_dir for task_dir in eligible_tasks if task_dir not in primary_tasks]
 
+        if len(primary_tasks) <= 1:
+            raise ValueError(
+                f"需要至少 2 个带标签的 task* 目录才能严格划分 me_block train/val；当前只有 {len(primary_tasks)} 个。"
+            )
+
         rng = random.Random(self.config.seed)
         rng.shuffle(primary_tasks)
-        split_index = max(1, int(len(primary_tasks) * self.config.train_ratio)) if primary_tasks else 0
+        split_index = max(1, int(len(primary_tasks) * self.config.train_ratio))
+        split_index = min(len(primary_tasks) - 1, split_index)
         train_tasks = set(primary_tasks[:split_index])
         val_tasks = set(primary_tasks[split_index:])
 
@@ -237,7 +243,7 @@ class ImportanceFrameDataset(Dataset):
         else:
             selected = val_tasks
         if not selected:
-            selected = train_tasks | set(auxiliary_tasks)
+            raise ValueError(f"{self.split} split 为空，请检查 train_ratio 和带标签任务数量。")
 
         samples = []
         for task_dir in eligible_tasks:
@@ -252,6 +258,9 @@ class ImportanceFrameDataset(Dataset):
                         "image_dirname": image_dirname,
                     }
                 )
+
+        if not samples:
+            raise ValueError(f"{self.split} split 没有可用的 me_block 标注样本。")
 
         return samples
 
