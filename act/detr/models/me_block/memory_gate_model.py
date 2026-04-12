@@ -328,7 +328,7 @@ class MemoryImageUpdater(nn.Module):
         candidate_scores = class_probs.to(current_image.dtype)
         if background_prob is not None:
             candidate_scores = candidate_scores
-        # candidate_scores = self._blur_scores(candidate_scores)
+        candidate_scores = self._blur_scores(candidate_scores)
         decayed_scores = prev_scores * float(self.memory_config.score_decay)
         write_mask_per_class = candidate_scores > (decayed_scores + float(self.memory_config.tau_up))
 

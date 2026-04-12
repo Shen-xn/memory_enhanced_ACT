@@ -212,24 +212,24 @@ def format_per_class_metrics(metrics: dict) -> str:
 
 
 def compute_class_weights(train_loader: DataLoader, num_classes: int, unlabeled_index: int) -> torch.Tensor:
-    # """Estimate inverse-frequency class weights from the training labels."""
-    # class_counts = np.zeros(num_classes, dtype=np.float64)
+    """Estimate inverse-frequency class weights from the training labels."""
+    class_counts = np.zeros(num_classes, dtype=np.float64)
 
-    # for _images, labels in train_loader:
-    #     labels = labels.numpy()
-    #     valid = labels != unlabeled_index
-    #     valid_labels = labels[valid]
-    #     if valid_labels.size == 0:
-    #         continue
-    #     bincount = np.bincount(valid_labels.reshape(-1), minlength=num_classes)
-    #     class_counts += bincount[:num_classes]
+    for _images, labels in train_loader:
+        labels = labels.numpy()
+        valid = labels != unlabeled_index
+        valid_labels = labels[valid]
+        if valid_labels.size == 0:
+            continue
+        bincount = np.bincount(valid_labels.reshape(-1), minlength=num_classes)
+        class_counts += bincount[:num_classes]
 
-    # class_counts = np.maximum(class_counts, 1.0)
-    # class_freq = class_counts / class_counts.sum()
-    # class_weights = 1.0 / np.sqrt(class_freq)
-    # class_weights = class_weights / class_weights.mean()
+    class_counts = np.maximum(class_counts, 1.0)
+    class_freq = class_counts / class_counts.sum()
+    class_weights = 1.0 / np.sqrt(class_freq)
+    class_weights = class_weights / class_weights.mean()
 
-    class_weights = np.array([1, 1, 1, 1]) # bg tgt goal arm
+    # class_weights = np.array([1, 1, 1, 1]) # bg tgt goal arm
     return torch.tensor(class_weights, dtype=torch.float32)
 
 
