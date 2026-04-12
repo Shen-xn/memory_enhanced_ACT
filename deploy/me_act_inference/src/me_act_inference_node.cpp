@@ -8,9 +8,12 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
-#include <future>
+#include <cstdint>
+#include <cstdio>
 #include <mutex>
 #include <optional>
 #include <random>
@@ -18,13 +21,13 @@
 #include <string>
 #include <vector>
 
+#include <rmw/qos_profiles.h>
+
 #include "act_pipeline.h"
 #include "ros_robot_controller_msgs/msg/get_bus_servo_cmd.hpp"
 #include "ros_robot_controller_msgs/msg/servo_position.hpp"
 #include "ros_robot_controller_msgs/msg/servos_position.hpp"
 #include "ros_robot_controller_msgs/srv/get_bus_servo_state.hpp"
-
-using namespace std::chrono_literals;
 
 namespace {
 
@@ -76,14 +79,16 @@ class MeActInferenceNode : public rclcpp::Node {
 
     pipeline_ = std::make_unique<ActPipeline>(deploy_dir_, device_);
 
-    callback_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+    control_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+    servo_client_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
 
     servo_command_pub_ =
         create_publisher<ros_robot_controller_msgs::msg::ServosPosition>(servo_command_topic_, 10);
-    rclcpp::ClientOptions client_options;
-    client_options.callback_group = callback_group_;
     servo_state_client_ =
-        create_client<ros_robot_controller_msgs::srv::GetBusServoState>(servo_state_service_, client_options);
+        create_client<ros_robot_controller_msgs::srv::GetBusServoState>(
+            servo_state_service_,
+            rmw_qos_profile_services_default,
+            servo_client_callback_group_);
 
     rgb_sub_.subscribe(this, rgb_topic_);
     depth_sub_.subscribe(this, depth_topic_);
@@ -105,9 +110,9 @@ class MeActInferenceNode : public rclcpp::Node {
     control_timer_ = create_wall_timer(
         std::chrono::milliseconds(control_period_ms_),
         std::bind(&MeActInferenceNode::OnControlTimer, this),
-        callback_group_);
+        control_callback_group_);
 
-    state_ = enable_inference_on_start_ ? RunState::RUNNING : RunState::IDLE;
+    state_.store(enable_inference_on_start_ ? RunState::RUNNING : RunState::IDLE);
     if (enable_me_block_ && !pipeline_->UsesMemoryImageInput()) {
       RCLCPP_WARN(get_logger(), "enable_me_block=true, but exported ACT is a single-image model. me_block will be ignored.");
     }
@@ -117,7 +122,7 @@ class MeActInferenceNode : public rclcpp::Node {
     RCLCPP_INFO(
         get_logger(),
         "me_act_inference_node ready. state=%s deploy_dir=%s enable_me_block=%s",
-        ToString(state_).c_str(),
+        ToString(state_.load()).c_str(),
         deploy_dir_.c_str(),
         enable_me_block_ ? "true" : "false");
   }
@@ -132,6 +137,13 @@ class MeActInferenceNode : public rclcpp::Node {
     rclcpp::Time depth_stamp;
     rclcpp::Time synced_stamp;
     uint64_t frame_id = 0;
+  };
+
+  struct PendingInference {
+    SyncedFrame frame;
+    rclcpp::Time state_query_started;
+    uint64_t tick = 0;
+    uint64_t generation = 0;
   };
 
   using SyncPolicy = message_filters::sync_policies::ApproximateTime<
@@ -150,6 +162,7 @@ class MeActInferenceNode : public rclcpp::Node {
     declare_parameter<int>("command_duration_ms", 220);
     declare_parameter<int>("max_frame_age_ms", 250);
     declare_parameter<int>("max_state_image_skew_ms", 150);
+    declare_parameter<int>("servo_state_timeout_ms", 500);
     declare_parameter<int>("sync_queue_size", 10);
     declare_parameter<bool>("enable_inference_on_start", false);
     declare_parameter<bool>("enable_me_block", false);
@@ -171,6 +184,7 @@ class MeActInferenceNode : public rclcpp::Node {
     command_duration_ms_ = get_parameter("command_duration_ms").as_int();
     max_frame_age_ms_ = get_parameter("max_frame_age_ms").as_int();
     max_state_image_skew_ms_ = get_parameter("max_state_image_skew_ms").as_int();
+    servo_state_timeout_ms_ = get_parameter("servo_state_timeout_ms").as_int();
     sync_queue_size_ = get_parameter("sync_queue_size").as_int();
     enable_inference_on_start_ = get_parameter("enable_inference_on_start").as_bool();
     enable_me_block_ = get_parameter("enable_me_block").as_bool();
@@ -223,13 +237,14 @@ class MeActInferenceNode : public rclcpp::Node {
   void OnControlTimer() {
     // The timer owns the real-time control loop. Services only change state or
     // reset memory; all motion commands pass through this method.
-    if (state_ == RunState::ESTOP || state_ == RunState::IDLE || state_ == RunState::FAULT) {
+    const auto state = state_.load();
+    if (state == RunState::ESTOP || state == RunState::IDLE || state == RunState::FAULT) {
       return;
     }
 
     const auto now = get_clock()->now();
-    if (state_ == RunState::INITIALIZING) {
-      if (now < initialize_until_) {
+    if (state == RunState::INITIALIZING) {
+      if (now < GetInitializeUntil()) {
         return;
       }
       {
@@ -237,12 +252,20 @@ class MeActInferenceNode : public rclcpp::Node {
         pipeline_->ResetMemory();
       }
       tick_id_ = 0;
-      state_ = RunState::RUNNING;
+      state_.store(RunState::RUNNING);
       RCLCPP_INFO(get_logger(), "Initialization finished. Switching to RUNNING.");
       return;
     }
 
-    if (now < next_command_allowed_at_) {
+    if (HasTimedOutPendingStateRequest(now)) {
+      EnterFault("Timed out while querying servo states.");
+      return;
+    }
+    if (HasActiveControlWork()) {
+      return;
+    }
+
+    if (now < GetNextCommandAllowedAt()) {
       return;
     }
 
@@ -257,21 +280,29 @@ class MeActInferenceNode : public rclcpp::Node {
       return;
     }
 
+    if (state_.load() != RunState::RUNNING) {
+      return;
+    }
+    const auto generation = control_generation_.load();
     const auto tick = ++tick_id_;
     const auto state_query_started = get_clock()->now();
-    const auto qpos = QueryServoPositions();
-    const auto state_received = get_clock()->now();
-    if (!qpos.has_value()) {
-      EnterFault("Failed to query servo states.");
+    SendServoStateRequest(*frame, tick, generation, state_query_started);
+  }
+
+  void RunInferenceWithState(
+      const PendingInference& pending,
+      const std::vector<float>& qpos,
+      const rclcpp::Time& state_received) {
+    if (state_.load() != RunState::RUNNING || control_generation_.load() != pending.generation) {
       return;
     }
 
-    const auto skew = state_received - frame->synced_stamp;
+    const auto skew = state_received - pending.frame.synced_stamp;
     if (std::abs(skew.nanoseconds()) > static_cast<int64_t>(max_state_image_skew_ms_) * 1000LL * 1000LL) {
       RCLCPP_WARN(
           get_logger(),
           "Tick %llu skipped due to image/state skew: %.1f ms",
-          static_cast<unsigned long long>(tick),
+          static_cast<unsigned long long>(pending.tick),
           skew.nanoseconds() / 1e6);
       return;
     }
@@ -282,26 +313,29 @@ class MeActInferenceNode : public rclcpp::Node {
       {
         // Protect online memory state from concurrent reset services.
         std::lock_guard<std::mutex> lock(pipeline_mutex_);
-        trajectory = pipeline_->Predict(frame->rgb_bgr, frame->depth_raw, *qpos, enable_me_block_);
+        trajectory = pipeline_->Predict(pending.frame.rgb_bgr, pending.frame.depth_raw, qpos, enable_me_block_);
       }
       const auto infer_finished = get_clock()->now();
+      if (state_.load() != RunState::RUNNING || control_generation_.load() != pending.generation) {
+        return;
+      }
       if (trajectory.empty() || trajectory.front().size() != servo_ids_.size()) {
         EnterFault("ACT returned an empty trajectory or wrong action dimension.");
         return;
       }
 
       PublishServoCommand(trajectory.front());
-      next_command_allowed_at_ = now + rclcpp::Duration::from_seconds(command_duration_ms_ / 1000.0);
+      SetNextCommandAllowedAt(infer_finished + rclcpp::Duration::from_seconds(command_duration_ms_ / 1000.0));
 
       RCLCPP_INFO(
           get_logger(),
           "tick=%llu frame=%llu frame_age=%.1fms state_wait=%.1fms infer=%.1fms qpos=[%s] cmd0=[%s]",
-          static_cast<unsigned long long>(tick),
-          static_cast<unsigned long long>(frame->frame_id),
-          (now - frame->synced_stamp).nanoseconds() / 1e6,
-          (state_received - state_query_started).nanoseconds() / 1e6,
+          static_cast<unsigned long long>(pending.tick),
+          static_cast<unsigned long long>(pending.frame.frame_id),
+          (infer_finished - pending.frame.synced_stamp).nanoseconds() / 1e6,
+          (state_received - pending.state_query_started).nanoseconds() / 1e6,
           (infer_finished - infer_started).nanoseconds() / 1e6,
-          JoinVector(*qpos).c_str(),
+          JoinVector(qpos).c_str(),
           JoinVector(trajectory.front()).c_str());
     } catch (const std::exception& exc) {
       EnterFault(exc.what());
@@ -313,10 +347,89 @@ class MeActInferenceNode : public rclcpp::Node {
     return latest_frame_;
   }
 
-  std::optional<std::vector<float>> QueryServoPositions() {
-    if (!servo_state_client_->wait_for_service(500ms)) {
-      RCLCPP_WARN(get_logger(), "Servo state service not available: %s", servo_state_service_.c_str());
-      return std::nullopt;
+  rclcpp::Time GetNextCommandAllowedAt() {
+    std::lock_guard<std::mutex> lock(schedule_mutex_);
+    return next_command_allowed_at_;
+  }
+
+  rclcpp::Time GetInitializeUntil() {
+    std::lock_guard<std::mutex> lock(schedule_mutex_);
+    return initialize_until_;
+  }
+
+  void SetNextCommandAllowedAt(const rclcpp::Time& next_command_allowed_at) {
+    std::lock_guard<std::mutex> lock(schedule_mutex_);
+    next_command_allowed_at_ = next_command_allowed_at;
+  }
+
+  void SetInitializationSchedule(
+      const rclcpp::Time& next_command_allowed_at,
+      const rclcpp::Time& initialize_until) {
+    std::lock_guard<std::mutex> lock(schedule_mutex_);
+    next_command_allowed_at_ = next_command_allowed_at;
+    initialize_until_ = initialize_until;
+  }
+
+  bool HasActiveControlWork() {
+    std::lock_guard<std::mutex> lock(pending_state_mutex_);
+    return pending_state_request_.has_value() || inference_in_progress_;
+  }
+
+  bool HasTimedOutPendingStateRequest(const rclcpp::Time& now) {
+    std::lock_guard<std::mutex> lock(pending_state_mutex_);
+    if (!pending_state_request_.has_value()) {
+      return false;
+    }
+    const auto elapsed = now - pending_state_request_->state_query_started;
+    const auto timeout_ns = static_cast<int64_t>(servo_state_timeout_ms_) * 1000LL * 1000LL;
+    if (elapsed.nanoseconds() <= timeout_ns) {
+      return false;
+    }
+    pending_state_request_.reset();
+    return true;
+  }
+
+  void ClearPendingStateRequest() {
+    std::lock_guard<std::mutex> lock(pending_state_mutex_);
+    pending_state_request_.reset();
+    inference_in_progress_ = false;
+  }
+
+  void InvalidateControlWork() {
+    control_generation_.fetch_add(1);
+    ClearPendingStateRequest();
+  }
+
+  bool BeginInferenceForResponse(uint64_t tick, uint64_t generation) {
+    std::lock_guard<std::mutex> lock(pending_state_mutex_);
+    if (!pending_state_request_.has_value() ||
+        pending_state_request_->tick != tick ||
+        pending_state_request_->generation != generation) {
+      return false;
+    }
+    pending_state_request_.reset();
+    inference_in_progress_ = true;
+    return true;
+  }
+
+  void FinishInferenceForResponse() {
+    std::lock_guard<std::mutex> lock(pending_state_mutex_);
+    inference_in_progress_ = false;
+  }
+
+  void SendServoStateRequest(
+      const SyncedFrame& frame,
+      uint64_t tick,
+      uint64_t generation,
+      const rclcpp::Time& state_query_started) {
+    if (!servo_state_client_->service_is_ready()) {
+      RCLCPP_WARN_THROTTLE(
+          get_logger(),
+          *get_clock(),
+          2000,
+          "Servo state service not available: %s",
+          servo_state_service_.c_str());
+      return;
     }
 
     auto request = std::make_shared<ros_robot_controller_msgs::srv::GetBusServoState::Request>();
@@ -328,18 +441,60 @@ class MeActInferenceNode : public rclcpp::Node {
       request->cmd.push_back(cmd);
     }
 
-    auto future = servo_state_client_->async_send_request(request);
-    if (future.wait_for(500ms) != std::future_status::ready) {
-      RCLCPP_WARN(get_logger(), "Timeout while querying bus servo state.");
-      return std::nullopt;
+    if (state_.load() != RunState::RUNNING || control_generation_.load() != generation) {
+      return;
+    }
+    const PendingInference request_context{
+        frame,
+        state_query_started,
+        tick,
+        generation};
+    {
+      std::lock_guard<std::mutex> lock(pending_state_mutex_);
+      pending_state_request_ = request_context;
     }
 
-    const auto response = future.get();
-    if (!response->success || response->state.empty()) {
+    servo_state_client_->async_send_request(
+        request,
+        [this, request_context](
+            rclcpp::Client<ros_robot_controller_msgs::srv::GetBusServoState>::SharedFuture future) {
+          OnServoStateResponse(request_context, future);
+        });
+  }
+
+  void OnServoStateResponse(
+      const PendingInference& request_context,
+      rclcpp::Client<ros_robot_controller_msgs::srv::GetBusServoState>::SharedFuture future) {
+    if (!BeginInferenceForResponse(request_context.tick, request_context.generation)) {
+      return;
+    }
+
+    const auto state_received = get_clock()->now();
+    ros_robot_controller_msgs::srv::GetBusServoState::Response::SharedPtr response;
+    try {
+      response = future.get();
+    } catch (const std::exception& exc) {
+      EnterFault(std::string("GetBusServoState future failed: ") + exc.what());
+      return;
+    }
+    if (!response || !response->success || response->state.empty()) {
       RCLCPP_WARN(get_logger(), "GetBusServoState returned no valid state.");
-      return std::nullopt;
+      EnterFault("GetBusServoState returned no valid state.");
+      return;
     }
 
+    const auto qpos = ExtractServoPositions(*response);
+    if (!qpos.has_value()) {
+      EnterFault("Failed to parse servo state response.");
+      return;
+    }
+
+    RunInferenceWithState(request_context, *qpos, state_received);
+    FinishInferenceForResponse();
+  }
+
+  std::optional<std::vector<float>> ExtractServoPositions(
+      const ros_robot_controller_msgs::srv::GetBusServoState::Response& response) const {
     std::vector<float> qpos;
     qpos.reserve(servo_ids_.size());
     for (const auto& bus_state : response->state) {
@@ -393,17 +548,18 @@ class MeActInferenceNode : public rclcpp::Node {
   void HandleStart(
       const std::shared_ptr<std_srvs::srv::Trigger::Request>,
       std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
-    if (state_ == RunState::FAULT) {
+    const auto state = state_.load();
+    if (state == RunState::FAULT) {
       response->success = false;
       response->message = "Node is in FAULT state. Restart node or reinitialize after fixing the cause.";
       return;
     }
-    if (state_ == RunState::INITIALIZING) {
+    if (state == RunState::INITIALIZING) {
       response->success = false;
       response->message = "Node is initializing. Wait until initialization finishes.";
       return;
     }
-    state_ = RunState::RUNNING;
+    state_.store(RunState::RUNNING);
     response->success = true;
     response->message = "Inference started.";
   }
@@ -411,12 +567,13 @@ class MeActInferenceNode : public rclcpp::Node {
   void HandleStop(
       const std::shared_ptr<std_srvs::srv::Trigger::Request>,
       std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
-    state_ = RunState::IDLE;
+    state_.store(RunState::IDLE);
+    InvalidateControlWork();
     {
       std::lock_guard<std::mutex> lock(pipeline_mutex_);
       pipeline_->ResetMemory();
     }
-    next_command_allowed_at_ = get_clock()->now();
+    SetNextCommandAllowedAt(get_clock()->now());
     response->success = true;
     response->message = "Inference stopped.";
   }
@@ -424,12 +581,13 @@ class MeActInferenceNode : public rclcpp::Node {
   void HandleEmergencyStop(
       const std::shared_ptr<std_srvs::srv::Trigger::Request>,
       std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
-    state_ = RunState::ESTOP;
+    state_.store(RunState::ESTOP);
+    InvalidateControlWork();
     {
       std::lock_guard<std::mutex> lock(pipeline_mutex_);
       pipeline_->ResetMemory();
     }
-    next_command_allowed_at_ = get_clock()->now();
+    SetNextCommandAllowedAt(get_clock()->now());
     response->success = true;
     response->message = "Emergency stop activated. No more motion commands will be sent.";
     RCLCPP_WARN(get_logger(), "Emergency stop activated.");
@@ -439,15 +597,18 @@ class MeActInferenceNode : public rclcpp::Node {
       const std::shared_ptr<std_srvs::srv::Trigger::Request>,
       std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
     try {
+      InvalidateControlWork();
       const auto pose = SampleInitializationPose();
       PublishServoCommand(pose);
       {
         std::lock_guard<std::mutex> lock(pipeline_mutex_);
         pipeline_->ResetMemory();
       }
-      next_command_allowed_at_ = get_clock()->now() + rclcpp::Duration::from_seconds(command_duration_ms_ / 1000.0);
-      initialize_until_ = get_clock()->now() + rclcpp::Duration::from_seconds((command_duration_ms_ + 300) / 1000.0);
-      state_ = RunState::INITIALIZING;
+      const auto now = get_clock()->now();
+      SetInitializationSchedule(
+          now + rclcpp::Duration::from_seconds(command_duration_ms_ / 1000.0),
+          now + rclcpp::Duration::from_seconds((command_duration_ms_ + 300) / 1000.0));
+      state_.store(RunState::INITIALIZING);
       response->success = true;
       response->message = "Initialization command sent.";
       RCLCPP_INFO(get_logger(), "Initialization pose sent: [%s]", JoinVector(pose).c_str());
@@ -459,7 +620,8 @@ class MeActInferenceNode : public rclcpp::Node {
   }
 
   void EnterFault(const std::string& reason) {
-    state_ = RunState::FAULT;
+    state_.store(RunState::FAULT);
+    InvalidateControlWork();
     {
       std::lock_guard<std::mutex> lock(pipeline_mutex_);
       pipeline_->ResetMemory();
@@ -477,6 +639,7 @@ class MeActInferenceNode : public rclcpp::Node {
   int command_duration_ms_ = 220;
   int max_frame_age_ms_ = 250;
   int max_state_image_skew_ms_ = 150;
+  int servo_state_timeout_ms_ = 500;
   int sync_queue_size_ = 10;
   bool enable_inference_on_start_ = false;
   bool enable_me_block_ = false;
@@ -486,14 +649,19 @@ class MeActInferenceNode : public rclcpp::Node {
   std::vector<int> physical_min_;
   std::vector<int> physical_max_;
 
-  RunState state_ = RunState::IDLE;
+  std::atomic<RunState> state_{RunState::IDLE};
+  std::atomic<uint64_t> control_generation_{0};
   uint64_t frame_counter_ = 0;
   uint64_t tick_id_ = 0;
 
   std::mutex frame_mutex_;
+  std::mutex schedule_mutex_;
   // Guards ActPipeline because it owns mutable recurrent me_block state.
   std::mutex pipeline_mutex_;
+  std::mutex pending_state_mutex_;
   std::optional<SyncedFrame> latest_frame_;
+  std::optional<PendingInference> pending_state_request_;
+  bool inference_in_progress_ = false;
   std::mt19937 rng_;
 
   std::unique_ptr<ActPipeline> pipeline_;
@@ -510,7 +678,8 @@ class MeActInferenceNode : public rclcpp::Node {
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr estop_srv_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr initialize_srv_;
   rclcpp::TimerBase::SharedPtr control_timer_;
-  rclcpp::CallbackGroup::SharedPtr callback_group_;
+  rclcpp::CallbackGroup::SharedPtr control_callback_group_;
+  rclcpp::CallbackGroup::SharedPtr servo_client_callback_group_;
 
   rclcpp::Time next_command_allowed_at_{0, 0, RCL_ROS_TIME};
   rclcpp::Time initialize_until_{0, 0, RCL_ROS_TIME};

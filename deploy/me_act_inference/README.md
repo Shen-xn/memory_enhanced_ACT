@@ -56,6 +56,8 @@ ros2 launch me_act_inference me_act_memory.launch.py
 
 ## 编译
 
+这个包按 ROS2 Humble 口径维护。舵机状态 service 使用 Humble 支持的 `create_client(..., rmw_qos_profile_services_default, callback_group)` 写法，不依赖新版本里的 `rclcpp::ClientOptions`。
+
 如果环境已经写进 `~/.zshrc`，直接：
 
 ```bash
@@ -86,6 +88,7 @@ source /home/ubuntu/ros2_ws/install/setup.zsh
 
 - `deploy_dir`
 - `device`
+- `servo_state_timeout_ms`
 
 例如：
 
@@ -103,6 +106,7 @@ source /home/ubuntu/ros2_ws/install/setup.zsh
 
 - `deploy_dir`
 - `device`
+- `servo_state_timeout_ms`
 
 例如：
 
@@ -159,6 +163,8 @@ max = [1000, 1000, 1000, 1000, 1000, 700]
 - 如果 memory launch 打开了 `enable_me_block`，但导出目录里没有 `me_block_inference.pt`，节点会直接启动失败
 - baseline 和 memory 版的导出目录不要混用
 - 双图 ACT 必须是重新按当前代码口径训练出来的模型
+- 舵机状态查询是异步的：控制 timer 只发送请求，response 回调回来后才做 ACT 推理和发命令。这样避免 timer 回调里同步等 service response 导致 executor 假超时或死锁
+- `servo_state_timeout_ms` 默认 500ms。你手动测试 get_state 大约 30-40ms，所以正常情况下不应该触发；如果触发，优先检查 service 回调是否被其它节点阻塞、消息字段是否变了，或者 executor 是否被单线程 launch/嵌套 spin 改坏
 - `initialize`、`stop`、`emergency_stop` 都会重置在线 memory state；节点内部会对推理和重置加锁，避免并发访问同一份 memory
 
 ## 你后面自己排查时优先看哪几处

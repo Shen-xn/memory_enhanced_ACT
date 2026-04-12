@@ -22,6 +22,7 @@ def generate_launch_description():
                         "command_duration_ms": 220,
                         "max_frame_age_ms": 250,
                         "max_state_image_skew_ms": 150,
+                        "servo_state_timeout_ms": 500,
                         "sync_queue_size": 10,
                         "enable_inference_on_start": False,
                         "enable_me_block": True,
