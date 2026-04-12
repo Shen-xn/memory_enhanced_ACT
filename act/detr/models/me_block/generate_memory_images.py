@@ -40,7 +40,25 @@ def parse_args(default_data_root: str = "") -> argparse.Namespace:
     parser.add_argument("--force", action="store_true", help="Overwrite existing memory_image_four_channel directories.")
     parser.add_argument("--debug", action="store_true", help="Also save score/mask/intermediate debug outputs.")
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference.")
+    parser.add_argument("--keep-top-ratio-target", type=float, default=None, help="Override checkpoint target memory keep ratio.")
+    parser.add_argument("--keep-top-ratio-goal", type=float, default=None, help="Override checkpoint goal memory keep ratio.")
+    parser.add_argument("--keep-top-ratio-arm", type=float, default=None, help="Override checkpoint arm memory keep ratio.")
     return parser.parse_args()
+
+
+def apply_memory_overrides(model: ImportanceMemoryModel, args: argparse.Namespace) -> None:
+    """Apply generation-only memory overrides without modifying checkpoint files."""
+    overrides = {
+        "keep_top_ratio_target": args.keep_top_ratio_target,
+        "keep_top_ratio_goal": args.keep_top_ratio_goal,
+        "keep_top_ratio_arm": args.keep_top_ratio_arm,
+    }
+    for name, value in overrides.items():
+        if value is None:
+            continue
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative, got {value}.")
+        setattr(model.config.memory, name, float(value))
 
 
 def load_model_from_checkpoint(path: str, device: torch.device) -> ImportanceMemoryModel:
@@ -53,6 +71,9 @@ def load_model_from_checkpoint(path: str, device: torch.device) -> ImportanceMem
         training=training_config_from_dict(config_payload.get("training", {})),
         generation=generation_config_from_dict(config_payload.get("generation", {})),
     )
+    # Checkpoint loading immediately restores learned weights, so pretrained
+    # initialization only adds an unnecessary cache/network dependency.
+    config.importance.pretrained_backbone = False
 
     model = ImportanceMemoryModel(config=config).to(device)
     model_state = checkpoint["model_state_dict"]
@@ -208,9 +229,17 @@ def main(default_data_root: str = "") -> None:
     args = parse_args(default_data_root=default_data_root)
     device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else "cuda")
     model = load_model_from_checkpoint(args.checkpoint, device)
+    apply_memory_overrides(model, args)
 
     if args.data_root:
         model.config.generation.data_root = args.data_root
+
+    print(
+        "Memory ratios: "
+        f"target={model.config.memory.keep_top_ratio_target} "
+        f"goal={model.config.memory.keep_top_ratio_goal} "
+        f"arm={model.config.memory.keep_top_ratio_arm}"
+    )
 
     task_dirs = list_task_dirs(
         model.config.generation.data_root,

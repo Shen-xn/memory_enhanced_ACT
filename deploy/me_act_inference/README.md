@@ -1,14 +1,14 @@
 # me_act_inference
 
-这个目录就是放进 Jetson ROS2 工作区 `src/` 的完整包，例如：
+这个目录是 Jetson/ROS2 侧的部署节点包，目标路径通常是：
 
 ```bash
 ~/ros2_ws/src/me_act_inference
 ```
 
-## 两种运行模式
+## 运行模式
 
-### 1. baseline ACT
+### baseline ACT
 
 ```text
 rgb + depth + servo_state(service) -> preprocess(BGRA) -> ACT -> action_seq[0] -> bus_servo/set_position
@@ -20,7 +20,7 @@ rgb + depth + servo_state(service) -> preprocess(BGRA) -> ACT -> action_seq[0] -
 ros2 launch me_act_inference me_act_baseline.launch.py
 ```
 
-### 2. me_act（在线 `me_block`）
+### ACT + online me_block
 
 ```text
 rgb + depth + servo_state(service) -> preprocess(BGRA) -> me_block -> memory_image -> ACT -> action_seq[0] -> bus_servo/set_position
@@ -30,6 +30,58 @@ rgb + depth + servo_state(service) -> preprocess(BGRA) -> me_block -> memory_ima
 
 ```bash
 ros2 launch me_act_inference me_act_memory.launch.py
+```
+
+## GPU
+
+两个 launch 默认使用 CUDA：
+
+```bash
+ros2 launch me_act_inference me_act_memory.launch.py
+ros2 launch me_act_inference me_act_baseline.launch.py
+```
+
+如果要临时用 CPU 调试：
+
+```bash
+ros2 launch me_act_inference me_act_memory.launch.py device:=cpu
+ros2 launch me_act_inference me_act_baseline.launch.py device:=cpu
+```
+
+节点启动时如果设置了 `device:=cuda`，但当前 LibTorch 不支持 CUDA，会直接报错。先在 Jetson 上确认：
+
+```bash
+python3 -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no cuda')"
+```
+
+编译时也要让 CMake 找到同一个 PyTorch/LibTorch：
+
+```bash
+export Torch_DIR=$(python3 -c "import torch, os; print(os.path.join(torch.utils.cmake_prefix_path, 'Torch'))")
+colcon build --symlink-install \
+  --packages-select me_act_inference \
+  --cmake-args -DTorch_DIR=$Torch_DIR
+```
+
+## Artifact 同步
+
+ROS 节点不重新实现 me_block 后处理，所有模型结构和 memory update 都来自导出的 TorchScript：
+
+```text
+deploy_artifacts_memory/
+  act_inference.pt
+  me_block_inference.pt
+  deploy_config.yml
+```
+
+所以修改 me_block 之后，需要重新导出 deployment artifacts。当前 me_block 后处理保留 blur，已经移除 opening；导出的 `me_block_inference.pt` 会带上这个逻辑。
+
+baseline artifact 目录不应该包含 `me_block_inference.pt`：
+
+```text
+deploy_artifacts_baseline/
+  act_inference.pt
+  deploy_config.yml
 ```
 
 ## 节点接口
@@ -54,128 +106,43 @@ ros2 launch me_act_inference me_act_memory.launch.py
 - `~/stop`
 - `~/emergency_stop`
 
-## 编译
+## 关键参数
 
-这个包按 ROS2 Humble 口径维护。舵机状态 service 使用 Humble 支持的 `create_client(..., rmw_qos_profile_services_default, callback_group)` 写法，不依赖新版本里的 `rclcpp::ClientOptions`。
+- `deploy_dir`: TorchScript artifact 目录。
+- `device`: `cuda` 或 `cpu`。
+- `enable_me_block`: memory launch 为 `true`，baseline launch 为 `false`。
+- `control_period_ms`: 控制 tick 周期。
+- `command_duration_ms`: 每次舵机命令写入的运动时长。
+- `init_command_duration_ms`: 初始化动作时长，默认 1500ms。
+- `servo_state_timeout_ms`: 查询舵机状态的超时时间。
 
-如果环境已经写进 `~/.zshrc`，直接：
-
-```bash
-export Torch_DIR=$(python3 -c "import torch, os; print(os.path.join(torch.utils.cmake_prefix_path, 'Torch'))")
-colcon build --symlink-install \
-  --packages-select me_act_inference \
-  --cmake-args -DTorch_DIR=$Torch_DIR
-```
-
-如果没有自动 source，再先：
-
-```bash
-source /opt/ros/humble/setup.zsh
-source /home/ubuntu/third_party_ros2/third_party_ws/install/setup.zsh
-source /home/ubuntu/third_party_ros2/orbbec_ws/install/setup.zsh
-source /home/ubuntu/ros2_ws/install/setup.zsh
-```
-
-## 启动前一定要改
-
-### baseline
-
-改：
-
-- [`launch/me_act_baseline.launch.py`](./launch/me_act_baseline.launch.py)
-
-至少确认：
-
-- `deploy_dir`
-- `device`
-- `servo_state_timeout_ms`
-
-例如：
-
-```text
-/home/ubuntu/my_models/me_act/deploy_artifacts_baseline
-```
-
-### memory 版
-
-改：
-
-- [`launch/me_act_memory.launch.py`](./launch/me_act_memory.launch.py)
-
-至少确认：
-
-- `deploy_dir`
-- `device`
-- `servo_state_timeout_ms`
-
-例如：
-
-```text
-/home/ubuntu/my_models/me_act/deploy_artifacts_memory
-```
+`initialize`、`stop`、`emergency_stop` 都会重置在线 memory state。节点内部会对推理和 memory reset 加锁，避免并发访问同一份 recurrent memory。
 
 ## 调试顺序
 
-1. 启动节点
-2. 初始化：
+1. 确认 `deploy_dir` 指向正确 artifact 目录。
+2. 确认 `device:=cuda` 时 PyTorch/LibTorch 真的支持 CUDA。
+3. 确认相机 topic 和舵机 service 存在。
+4. 调用初始化：
 
 ```bash
 ros2 service call /me_act_inference_node/initialize std_srvs/srv/Trigger "{}"
 ```
 
-3. 开始：
+5. 开始推理：
 
 ```bash
 ros2 service call /me_act_inference_node/start std_srvs/srv/Trigger "{}"
 ```
 
-4. 停止：
+6. 停止：
 
 ```bash
 ros2 service call /me_act_inference_node/stop std_srvs/srv/Trigger "{}"
 ```
 
-5. 急停：
+7. 急停：
 
 ```bash
 ros2 service call /me_act_inference_node/emergency_stop std_srvs/srv/Trigger "{}"
 ```
-
-## 初始化说明
-
-初始化中心姿态：
-
-```text
-[500, 560, 120, 180, 500, 240]
-```
-
-每次初始化都会加 `±100` 随机扰动，再裁剪到：
-
-```text
-min = [0, 0, 0, 0, 0, 100]
-max = [1000, 1000, 1000, 1000, 1000, 700]
-```
-
-## 最重要的检查项
-
-- baseline launch 默认 `enable_me_block = False`
-- memory launch 默认 `enable_me_block = True`
-- 如果 memory launch 打开了 `enable_me_block`，但导出目录里没有 `me_block_inference.pt`，节点会直接启动失败
-- baseline 和 memory 版的导出目录不要混用
-- 双图 ACT 必须是重新按当前代码口径训练出来的模型
-- 舵机状态查询是异步的：控制 timer 只发送请求，response 回调回来后才做 ACT 推理和发命令。这样避免 timer 回调里同步等 service response 导致 executor 假超时或死锁
-- `servo_state_timeout_ms` 默认 500ms。你手动测试 get_state 大约 30-40ms，所以正常情况下不应该触发；如果触发，优先检查 service 回调是否被其它节点阻塞、消息字段是否变了，或者 executor 是否被单线程 launch/嵌套 spin 改坏
-- `initialize`、`stop`、`emergency_stop` 都会重置在线 memory state；节点内部会对推理和重置加锁，避免并发访问同一份 memory
-
-## 你后面自己排查时优先看哪几处
-
-1. `deploy_dir` 是否指对
-2. `ros2 topic list` / `ros2 service list` 是否包含相机和舵机接口
-3. `initialize` 是否成功
-4. 节点日志里是否出现：
-   - frame 太旧
-   - image/state skew 太大
-   - servo state service timeout
-5. 如果换平台后消息字段不一致，优先改：
-
-- [`src/me_act_inference_node.cpp`](./src/me_act_inference_node.cpp)

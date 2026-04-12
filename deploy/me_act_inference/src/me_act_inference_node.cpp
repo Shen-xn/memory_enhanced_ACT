@@ -158,8 +158,9 @@ class MeActInferenceNode : public rclcpp::Node {
     declare_parameter<std::string>("depth_topic", "/depth_cam/depth/image_raw");
     declare_parameter<std::string>("servo_command_topic", "/ros_robot_controller/bus_servo/set_position");
     declare_parameter<std::string>("servo_state_service", "/ros_robot_controller/bus_servo/get_state");
-    declare_parameter<int>("control_period_ms", 200);
-    declare_parameter<int>("command_duration_ms", 220);
+    declare_parameter<int>("control_period_ms", 100);
+    declare_parameter<int>("command_duration_ms", 300);
+    declare_parameter<int>("init_command_duration_ms", 1500);
     declare_parameter<int>("max_frame_age_ms", 250);
     declare_parameter<int>("max_state_image_skew_ms", 150);
     declare_parameter<int>("servo_state_timeout_ms", 5000);
@@ -182,6 +183,7 @@ class MeActInferenceNode : public rclcpp::Node {
     servo_state_service_ = get_parameter("servo_state_service").as_string();
     control_period_ms_ = get_parameter("control_period_ms").as_int();
     command_duration_ms_ = get_parameter("command_duration_ms").as_int();
+    init_command_duration_ms_ = get_parameter("init_command_duration_ms").as_int();
     max_frame_age_ms_ = get_parameter("max_frame_age_ms").as_int();
     max_state_image_skew_ms_ = get_parameter("max_state_image_skew_ms").as_int();
     servo_state_timeout_ms_ = get_parameter("servo_state_timeout_ms").as_int();
@@ -265,10 +267,6 @@ class MeActInferenceNode : public rclcpp::Node {
       return;
     }
 
-    if (now < GetNextCommandAllowedAt()) {
-      return;
-    }
-
     auto frame = GetLatestFrame();
     if (!frame.has_value()) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "No synced RGB/depth frame available yet.");
@@ -324,8 +322,7 @@ class MeActInferenceNode : public rclcpp::Node {
         return;
       }
 
-      PublishServoCommand(trajectory.front());
-      SetNextCommandAllowedAt(infer_finished + rclcpp::Duration::from_seconds(command_duration_ms_ / 1000.0));
+      PublishServoCommand(trajectory.front(), command_duration_ms_);
 
       RCLCPP_INFO(
           get_logger(),
@@ -347,26 +344,13 @@ class MeActInferenceNode : public rclcpp::Node {
     return latest_frame_;
   }
 
-  rclcpp::Time GetNextCommandAllowedAt() {
-    std::lock_guard<std::mutex> lock(schedule_mutex_);
-    return next_command_allowed_at_;
-  }
-
   rclcpp::Time GetInitializeUntil() {
     std::lock_guard<std::mutex> lock(schedule_mutex_);
     return initialize_until_;
   }
 
-  void SetNextCommandAllowedAt(const rclcpp::Time& next_command_allowed_at) {
+  void SetInitializeUntil(const rclcpp::Time& initialize_until) {
     std::lock_guard<std::mutex> lock(schedule_mutex_);
-    next_command_allowed_at_ = next_command_allowed_at;
-  }
-
-  void SetInitializationSchedule(
-      const rclcpp::Time& next_command_allowed_at,
-      const rclcpp::Time& initialize_until) {
-    std::lock_guard<std::mutex> lock(schedule_mutex_);
-    next_command_allowed_at_ = next_command_allowed_at;
     initialize_until_ = initialize_until;
   }
 
@@ -515,9 +499,9 @@ class MeActInferenceNode : public rclcpp::Node {
     return qpos;
   }
 
-  void PublishServoCommand(const std::vector<float>& action) {
+  void PublishServoCommand(const std::vector<float>& action, int duration_ms) {
     ros_robot_controller_msgs::msg::ServosPosition msg;
-    msg.duration = static_cast<float>(command_duration_ms_) / 1000.0f;
+    msg.duration = static_cast<float>(duration_ms) / 1000.0f;
     msg.position.reserve(servo_ids_.size());
 
     for (size_t i = 0; i < servo_ids_.size(); ++i) {
@@ -573,7 +557,6 @@ class MeActInferenceNode : public rclcpp::Node {
       std::lock_guard<std::mutex> lock(pipeline_mutex_);
       pipeline_->ResetMemory();
     }
-    SetNextCommandAllowedAt(get_clock()->now());
     response->success = true;
     response->message = "Inference stopped.";
   }
@@ -587,7 +570,6 @@ class MeActInferenceNode : public rclcpp::Node {
       std::lock_guard<std::mutex> lock(pipeline_mutex_);
       pipeline_->ResetMemory();
     }
-    SetNextCommandAllowedAt(get_clock()->now());
     response->success = true;
     response->message = "Emergency stop activated. No more motion commands will be sent.";
     RCLCPP_WARN(get_logger(), "Emergency stop activated.");
@@ -599,15 +581,13 @@ class MeActInferenceNode : public rclcpp::Node {
     try {
       InvalidateControlWork();
       const auto pose = SampleInitializationPose();
-      PublishServoCommand(pose);
+      PublishServoCommand(pose, init_command_duration_ms_);
       {
         std::lock_guard<std::mutex> lock(pipeline_mutex_);
         pipeline_->ResetMemory();
       }
       const auto now = get_clock()->now();
-      SetInitializationSchedule(
-          now + rclcpp::Duration::from_seconds(command_duration_ms_ / 1000.0),
-          now + rclcpp::Duration::from_seconds((command_duration_ms_ + 300) / 1000.0));
+      SetInitializeUntil(now + rclcpp::Duration::from_seconds((init_command_duration_ms_ + 300) / 1000.0));
       state_.store(RunState::INITIALIZING);
       response->success = true;
       response->message = "Initialization command sent.";
@@ -635,8 +615,9 @@ class MeActInferenceNode : public rclcpp::Node {
   std::string depth_topic_;
   std::string servo_command_topic_;
   std::string servo_state_service_;
-  int control_period_ms_ = 200;
-  int command_duration_ms_ = 220;
+  int control_period_ms_ = 100;
+  int command_duration_ms_ = 300;
+  int init_command_duration_ms_ = 1500;
   int max_frame_age_ms_ = 250;
   int max_state_image_skew_ms_ = 150;
   int servo_state_timeout_ms_ = 500;
@@ -681,7 +662,6 @@ class MeActInferenceNode : public rclcpp::Node {
   rclcpp::CallbackGroup::SharedPtr control_callback_group_;
   rclcpp::CallbackGroup::SharedPtr servo_client_callback_group_;
 
-  rclcpp::Time next_command_allowed_at_{0, 0, RCL_ROS_TIME};
   rclcpp::Time initialize_until_{0, 0, RCL_ROS_TIME};
 };
 

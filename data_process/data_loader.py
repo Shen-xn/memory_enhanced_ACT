@@ -286,7 +286,10 @@ class ImitationDataset(Dataset):
                     "curr": df.iloc[i][joint_cols].values.astype(np.float32),
                     "future": df.iloc[i+1 : i+1+self.future_steps][joint_cols].values.astype(np.float32),
                     "task": task_dir,
-                    "obst": is_obstacle
+                    "frame_index": i,
+                    # The first frame of a trajectory is the reset/context
+                    # frame, so do not let obstacle mode start there.
+                    "obst": is_obstacle and i > 0
                 }
                 samples.append(sample)
 

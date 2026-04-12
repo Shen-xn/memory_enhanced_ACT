@@ -65,6 +65,11 @@ def parse_args(default_data_root: str = "", default_label_dirname: str = "import
         action="store_true",
         help="Start each task from frame 0 instead of the first unlabeled frame.",
     )
+    parser.add_argument(
+        "--labeled-only",
+        action="store_true",
+        help="Only visit frames that already have saved labels. Useful for batch cleanup/revision.",
+    )
     return parser.parse_args()
 
 
@@ -193,7 +198,9 @@ class ImportanceLabelAnnotator:
 
             label_dir = os.path.join(task_dir, self.args.label_dirname)
             labeled_count = sum(1 for frame_path in frame_paths if os.path.exists(self._label_path(label_dir, frame_path)))
-            if labeled_count == len(frame_paths) and not self.args.relabel:
+            if self.args.labeled_only and labeled_count == 0:
+                continue
+            if not self.args.labeled_only and labeled_count == len(frame_paths) and not self.args.relabel:
                 continue
 
             tasks.append(
@@ -223,7 +230,9 @@ class ImportanceLabelAnnotator:
         order = []
         for task_idx, task in enumerate(self.tasks):
             for frame_idx in range(len(task.frame_paths)):
-                if not self.args.relabel and self._label_exists_for_task_frame(task, frame_idx):
+                if self.args.labeled_only and not self._label_exists_for_task_frame(task, frame_idx):
+                    continue
+                if not self.args.labeled_only and not self.args.relabel and self._label_exists_for_task_frame(task, frame_idx):
                     continue
                 order.append((task_idx, frame_idx))
 
@@ -242,6 +251,8 @@ class ImportanceLabelAnnotator:
         return os.path.exists(self._label_path(task.label_dir, task.frame_paths[frame_idx]))
 
     def _start_order_index(self) -> int:
+        if self.args.labeled_only:
+            return 0
         if self.args.start_first_frame:
             return 0
         for order_idx, (task_idx, frame_idx) in enumerate(self.frame_order):

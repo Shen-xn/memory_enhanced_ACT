@@ -29,6 +29,7 @@ import numpy as np
 DEFAULT_TRIGGER_PROB = 0.01
 DEFAULT_CANCEL_PROB = 0.05
 DEFAULT_SEED = 42
+MIN_OCCLUSION_START_FRAME = 1
 
 
 @dataclass
@@ -341,7 +342,8 @@ def process_task(
         frame = read_four_channel_png(source_frame_path)
         height, width = frame.shape[:2]
 
-        if occluder is None and rng.random() < trigger_prob:
+        can_start_occlusion = frame_idx >= MIN_OCCLUSION_START_FRAME
+        if can_start_occlusion and occluder is None and rng.random() < trigger_prob:
             spawn_point = sample_spawn_point(width, height, rng)
             occluder = build_random_occluder(spawn_point, width, height, frame_idx, rng)
             current_event = {
@@ -387,6 +389,7 @@ def process_task(
         "generated_task": target_name,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "frame_count": len(source_frames),
+        "min_occlusion_start_frame": MIN_OCCLUSION_START_FRAME,
         "trigger_probability": trigger_prob,
         "cancel_probability": cancel_prob,
         "events": events,

@@ -209,81 +209,121 @@ class ImportanceFrameDataset(Dataset):
         self.split = split
         self.samples = self._load_samples()
 
+class ImportanceFrameDataset(Dataset):
+    """Frame-level dataset for importance segmentation.
+
+    The split is task-based rather than frame-based, so validation remains a
+    genuine held-out trajectory set. `special_data` is treated as auxiliary
+    train-only data.
+    """
+
+    def __init__(
+        self,
+        config: ImportanceTrainingConfig,
+        model_config: ImportanceModelConfig,
+        split: str,
+    ):
+        if split not in {"train", "val"}:
+            raise ValueError(f"Unsupported split: {split}")
+
+        self.config = config
+        self.model_config = model_config
+        self.split = split
+        self.samples = self._load_samples()
+
     def _load_samples(self) -> List[Dict]:
-        """Collect image/label pairs and apply the strict train/val task split."""
+        """Collect image/label pairs and apply RANDOM IMAGE-level train/val split."""
         task_dirs = list_task_dirs(self.config.data_root, image_dirname=self.config.image_dirname)
         if not task_dirs:
             raise FileNotFoundError(f"No task folders found under {self.config.data_root}")
 
-        eligible_tasks: List[str] = []
-        task_matches: Dict[str, List[Tuple[str, str]]] = {}
+        all_samples = []
+        special_samples = []
+
         for task_dir in task_dirs:
+            task_name = os.path.basename(task_dir)
             resolved_image_dirname = resolve_task_image_dir(task_dir, self.config.image_dirname)
             if not resolved_image_dirname:
                 continue
             label_dir = os.path.join(task_dir, self.config.label_dirname)
             image_dir = os.path.join(task_dir, resolved_image_dirname)
-            if not os.path.isdir(label_dir):
+            if not os.path.isdir(label_dir) or not os.path.isdir(image_dir):
                 continue
-            if not os.path.isdir(image_dir):
-                continue
+
             image_paths = list_image_files(image_dir)
             label_paths = sorted(glob.glob(os.path.join(label_dir, "*.png")))
             image_map = {os.path.splitext(os.path.basename(path))[0]: path for path in image_paths}
             label_map = {os.path.splitext(os.path.basename(path))[0]: path for path in label_paths}
             shared_names = sorted(set(image_map.keys()) & set(label_map.keys()))
-            if shared_names:
-                eligible_tasks.append(task_dir)
-                task_matches[task_dir] = [
-                    (image_map[name], label_map[name], resolved_image_dirname)
-                    for name in shared_names
-                ]
 
-        if not eligible_tasks:
-            raise FileNotFoundError(
-                f"No tasks with both image inputs and `{self.config.label_dirname}` were found."
-            )
+            for name in shared_names:
+                sample = {
+                    "task": task_name,
+                    "image_path": image_map[name],
+                    "label_path": label_map[name],
+                    "image_dirname": resolved_image_dirname,
+                }
+                if task_name == SPECIAL_TASK_NAME:
+                    special_samples.append(sample)
+                else:
+                    all_samples.append(sample)
 
-        primary_tasks = [task_dir for task_dir in eligible_tasks if os.path.basename(task_dir).startswith("task")]
-        auxiliary_tasks = [task_dir for task_dir in eligible_tasks if task_dir not in primary_tasks]
+        if not all_samples:
+            raise FileNotFoundError("No valid labeled samples found in task* folders.")
 
-        if len(primary_tasks) <= 1:
-            raise ValueError(
-                f"需要至少 2 个带标签的 task* 目录才能严格划分 me_block train/val；当前只有 {len(primary_tasks)} 个。"
-            )
-
+        # 全局打乱所有图片
         rng = random.Random(self.config.seed)
-        rng.shuffle(primary_tasks)
-        split_index = max(1, int(len(primary_tasks) * self.config.train_ratio))
-        split_index = min(len(primary_tasks) - 1, split_index)
-        train_tasks = set(primary_tasks[:split_index])
-        val_tasks = set(primary_tasks[split_index:])
+        rng.shuffle(all_samples)
+
+        total_images = len(all_samples)
+        split_index = int(total_images * self.config.train_ratio)
+
+        # 强制至少各一张
+        split_index = max(1, split_index)
+        split_index = min(total_images - 1, split_index)
+
+        train_images = all_samples[:split_index]
+        val_images = all_samples[split_index:]
 
         if self.split == "train":
-            selected = train_tasks | set(auxiliary_tasks)
+            final_samples = train_images + special_samples
         else:
-            selected = val_tasks
-        if not selected:
-            raise ValueError(f"{self.split} split 为空，请检查 train_ratio 和带标签任务数量。")
+            final_samples = val_images
 
-        samples = []
-        for task_dir in eligible_tasks:
-            if task_dir not in selected:
-                continue
-            for image_path, label_path, image_dirname in task_matches[task_dir]:
-                samples.append(
-                    {
-                        "task": os.path.basename(task_dir),
-                        "image_path": image_path,
-                        "label_path": label_path,
-                        "image_dirname": image_dirname,
-                    }
-                )
+        if not final_samples:
+            raise ValueError(f"{self.split} split has no samples!")
 
-        if not samples:
-            raise ValueError(f"{self.split} split 没有可用的 me_block 标注样本。")
+        return final_samples
 
-        return samples
+    def __len__(self) -> int:
+        return len(self.samples)  # 这行必须在！刚才就是缺了它
+
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        sample = self.samples[index]
+        image = read_model_input(
+            sample["image_path"],
+            sample["image_dirname"],
+            self.model_config.input_channels,
+        ).astype(np.float32) / 255.0
+        label = read_label(sample["label_path"])
+        if self.split == "train":
+            image, label = augment_sample(
+                image,
+                label,
+                self.config,
+                self.model_config.unlabeled_index,
+            )
+
+        allowed_values = {self.model_config.background_index, self.model_config.unlabeled_index}
+        allowed_values.update(range(1, self.model_config.num_foreground_classes + 1))
+        unique_values = set(int(v) for v in np.unique(label))
+        invalid_values = sorted(unique_values - allowed_values)
+        if invalid_values:
+            raise ValueError(f"Unexpected label values {invalid_values} in {sample['label_path']}.")
+
+        image_tensor = torch.from_numpy(np.transpose(image, (2, 0, 1))).float()
+        label_tensor = torch.from_numpy(label).long()
+        return image_tensor, label_tensor
 
     def __len__(self) -> int:
         return len(self.samples)

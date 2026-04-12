@@ -15,15 +15,15 @@ class ImportanceModelConfig:
 
     # Changes in this block affect the segmentation model itself.
     # If you change them, train a new checkpoint.
-    model_name: str = "truncated_resnet18_layer2"
+    model_name: str = "compact_fpn_v1"
     input_channels: int = 4
     segmentation_input_channels: int = 3
     background_index: int = 0
     unlabeled_index: int = 255
     class_names: List[str] = field(default_factory=lambda: list(DEFAULT_CLASS_NAMES))
-    image_mean: List[float] = field(default_factory=lambda: [0.485, 0.456, 0.406, 0.5])
-    image_std: List[float] = field(default_factory=lambda: [0.229, 0.224, 0.225, 0.5])
-    pretrained_backbone: bool = True
+    image_mean: List[float] = field(default_factory=lambda: [0.5, 0.5, 0.5, 0.5])
+    image_std: List[float] = field(default_factory=lambda: [0.5, 0.5, 0.5, 0.5])
+    pretrained_backbone: bool = False
 
     @property
     def num_foreground_classes(self) -> int:
@@ -41,9 +41,9 @@ class MemoryUpdateConfig:
     # keep_top_ratio_* means "keep the top fraction of pixels by score_state for each class".
     # Example: keep_top_ratio_target=0.05 keeps the top 5% target pixels in each frame.
     score_decay: float = 0.92
-    tau_up: float = 0.1
-    keep_top_ratio_target: float = 0.05
-    keep_top_ratio_goal: float = 0.08
+    tau_up: float = 0.0
+    keep_top_ratio_target: float = 0.02
+    keep_top_ratio_goal: float = 0.04
     keep_top_ratio_arm: float = 0.2
 
 
@@ -64,16 +64,16 @@ class ImportanceTrainingConfig:
     horizontal_flip_prob: float = 0.5
     translation_px: int = 32
     rotation_deg: float = 10.0
-    scale_min: float = 0.85
-    scale_max: float = 1.15
-    batch_size: int = 4
+    scale_min: float = 0.8
+    scale_max: float = 1.2
+    batch_size: int = 8
     num_workers: int = 0
-    num_epochs: int = 60
-    learning_rate: float = 1e-4
-    weight_decay: float = 3e-4
+    num_epochs: int = 50
+    learning_rate: float = 2e-4
+    weight_decay: float = 1e-6
     lr_scheduler: str = "warmup_cosine"
     # Warmup prevents early unstable updates; cosine decay keeps late training gentle.
-    warmup_epochs: int = 3
+    warmup_epochs: int = 5
     min_lr_ratio: float = 0.1
     train_ratio: float = 0.8
     seed: int = 42
@@ -123,6 +123,15 @@ def _filter_dataclass_payload(cls, payload: Dict | None) -> Dict:
 
 def importance_model_config_from_dict(payload: Dict | None) -> ImportanceModelConfig:
     data = _filter_dataclass_payload(ImportanceModelConfig, payload)
+    # Older checkpoints were trained before `model_name` was saved. Treat those
+    # configs as the original ResNet18-layer2 model instead of inheriting today's
+    # default architecture.
+    if payload is not None and "model_name" not in payload:
+        data.setdefault("model_name", "truncated_resnet18_layer2")
+        data.setdefault("segmentation_input_channels", 3)
+        data.setdefault("image_mean", [0.485, 0.456, 0.406, 0.5])
+        data.setdefault("image_std", [0.229, 0.224, 0.225, 0.5])
+        data.setdefault("pretrained_backbone", True)
     return ImportanceModelConfig(**data)
 
 

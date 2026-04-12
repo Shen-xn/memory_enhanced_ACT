@@ -125,18 +125,106 @@ class TruncatedResNet18Layer2Segmentation(nn.Module):
         return F.interpolate(logits, size=images.shape[-2:], mode="bilinear", align_corners=False)
 
 
+class ConvBNAct(nn.Module):
+    """Reusable 3x3 conv block for the scratch compact FPN."""
+
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.block(x)
+
+
+class ResidualBlock(nn.Module):
+    """Small residual block used by the non-pretrained FPN encoder."""
+
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
+        super().__init__()
+        self.conv1 = ConvBNAct(in_channels, out_channels, stride=stride)
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+        )
+        if stride != 1 or in_channels != out_channels:
+            self.skip = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels),
+            )
+        else:
+            self.skip = nn.Identity()
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(self.conv2(self.conv1(x)) + self.skip(x))
+
+
+class CompactFPNV1Segmentation(nn.Module):
+    """Scratch FPN tuned for small, contiguous target/goal/arm masks.
+
+    The encoder reaches stride 8 like the old truncated ResNet18 path, while
+    the decoder fuses stride-4 and stride-2 features before the final logits.
+    This keeps the parameter count close to the old model but gives small
+    objects and boundaries a higher-resolution path.
+    """
+
+    def __init__(self, config: ImportanceModelConfig):
+        super().__init__()
+        in_channels = int(config.segmentation_input_channels)
+        fpn_channels = 64
+        self.stem = ConvBNAct(in_channels, 32, stride=2)
+        self.stage1 = ResidualBlock(32, 32, stride=1)
+        self.stage2 = ResidualBlock(32, 64, stride=2)
+        self.stage3 = nn.Sequential(
+            ResidualBlock(64, 128, stride=2),
+            ResidualBlock(128, 128, stride=1),
+        )
+
+        self.lateral1 = nn.Conv2d(32, fpn_channels, kernel_size=1)
+        self.lateral2 = nn.Conv2d(64, fpn_channels, kernel_size=1)
+        self.lateral3 = nn.Conv2d(128, fpn_channels, kernel_size=1)
+        self.refine2 = ConvBNAct(fpn_channels, fpn_channels)
+        self.refine1 = ConvBNAct(fpn_channels, fpn_channels)
+        self.head = nn.Sequential(
+            ConvBNAct(fpn_channels, 32),
+            nn.Conv2d(32, config.num_output_classes, kernel_size=1),
+        )
+
+    def forward(self, images: torch.Tensor, config: ImportanceModelConfig) -> torch.Tensor:
+        normalized = normalize_image_channels(images, config)
+        feat1 = self.stage1(self.stem(normalized))
+        feat2 = self.stage2(feat1)
+        feat3 = self.stage3(feat2)
+
+        pyramid = self.lateral3(feat3)
+        pyramid = F.interpolate(pyramid, size=feat2.shape[-2:], mode="bilinear", align_corners=False)
+        pyramid = self.refine2(pyramid + self.lateral2(feat2))
+        pyramid = F.interpolate(pyramid, size=feat1.shape[-2:], mode="bilinear", align_corners=False)
+        pyramid = self.refine1(pyramid + self.lateral1(feat1))
+
+        logits = self.head(pyramid)
+        return F.interpolate(logits, size=images.shape[-2:], mode="bilinear", align_corners=False)
+
+
 class ImportanceSegmentationModel(nn.Module):
     """Thin wrapper that owns the architecture choice and input-channel selection."""
 
     def __init__(self, config: ImportanceModelConfig):
         super().__init__()
         self.config = config
-        if config.model_name != "truncated_resnet18_layer2":
+        if config.model_name == "truncated_resnet18_layer2":
+            self.model = TruncatedResNet18Layer2Segmentation(config)
+        elif config.model_name == "compact_fpn_v1":
+            self.model = CompactFPNV1Segmentation(config)
+        else:
             raise ValueError(
                 f"Unsupported importance model: {config.model_name}. "
-                "Current code only keeps truncated_resnet18_layer2."
+                "Supported models: truncated_resnet18_layer2, compact_fpn_v1."
             )
-        self.model = TruncatedResNet18Layer2Segmentation(config)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         segmentation_images = select_segmentation_input(images, self.config)
@@ -181,6 +269,10 @@ class MemoryImageUpdater(nn.Module):
         topk_indices = flat_scores.topk(keep_count, dim=1).indices
         flat_mask = torch.zeros_like(flat_scores, dtype=torch.float32).scatter(1, topk_indices, 1.0).to(torch.bool)
         return flat_mask.view(batch_size, 1, height, width)
+
+    def _blur_scores(self, scores: torch.Tensor) -> torch.Tensor:
+        """Suppress isolated hot pixels before memory writing and top-ratio masks."""
+        return F.avg_pool2d(scores, kernel_size=5, stride=1, padding=2)
 
     def step(
         self,
@@ -235,7 +327,8 @@ class MemoryImageUpdater(nn.Module):
 
         candidate_scores = class_probs.to(current_image.dtype)
         if background_prob is not None:
-            candidate_scores = candidate_scores * (1.0 - background_prob.to(current_image.dtype))
+            candidate_scores = candidate_scores
+        # candidate_scores = self._blur_scores(candidate_scores)
         decayed_scores = prev_scores * float(self.memory_config.score_decay)
         write_mask_per_class = candidate_scores > (decayed_scores + float(self.memory_config.tau_up))
 

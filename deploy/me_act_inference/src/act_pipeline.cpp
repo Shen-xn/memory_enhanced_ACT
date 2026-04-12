@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <stdexcept>
+#include <torch/cuda.h>
 
 namespace {
 
@@ -117,6 +118,11 @@ DeployConfig ActPipeline::LoadConfig(const std::string& path) {
 
 torch::Device ActPipeline::ParseDevice(const std::string& device) {
   if (device == "cuda") {
+    if (!torch::cuda::is_available()) {
+      throw std::runtime_error(
+          "ROS parameter device='cuda' was requested, but LibTorch reports CUDA is not available. "
+          "Install a CUDA-enabled LibTorch/PyTorch build on Jetson or set device='cpu'.");
+    }
     return torch::Device(torch::kCUDA);
   }
   return torch::Device(torch::kCPU);

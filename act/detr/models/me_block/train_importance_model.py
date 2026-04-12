@@ -110,17 +110,17 @@ def compute_mean_iou(logits: torch.Tensor, targets: torch.Tensor, num_classes: i
     return float(sum(ious) / len(ious)) if ious else 0.0
 
 
-def accumulate_foreground_recall_counts(
+def accumulate_class_recall_counts(
     logits: torch.Tensor,
     targets: torch.Tensor,
-    num_foreground_classes: int,
+    num_classes: int,
     unlabeled_index: int,
 ) -> tuple[list[int], list[int]]:
-    """Accumulate foreground recall counts for target/goal/arm diagnostics."""
+    """Accumulate recall counts for background and foreground classes."""
     preds = logits.argmax(dim=1)
     true_positive = []
     ground_truth = []
-    for class_index in range(1, num_foreground_classes + 1):
+    for class_index in range(num_classes):
         valid_gt = targets == class_index
         tp = ((preds == class_index) & valid_gt).sum().item()
         gt = valid_gt.sum().item()
@@ -143,8 +143,9 @@ def run_epoch(
     stage_name = "train" if is_train else "val"
     losses = []
     ious = []
-    tp_counts = [0 for _ in class_names]
-    gt_counts = [0 for _ in class_names]
+    metric_class_names = ["background"] + list(class_names)
+    tp_counts = [0 for _ in metric_class_names]
+    gt_counts = [0 for _ in metric_class_names]
 
     progress = tqdm(loader, leave=False, desc=stage_name)
     for images, labels in progress:
@@ -168,10 +169,10 @@ def run_epoch(
                 model.config.importance.unlabeled_index,
             )
         )
-        batch_tp, batch_gt = accumulate_foreground_recall_counts(
+        batch_tp, batch_gt = accumulate_class_recall_counts(
             logits.detach(),
             labels,
-            model.config.importance.num_foreground_classes,
+            model.config.importance.num_output_classes,
             model.config.importance.unlabeled_index,
         )
         tp_counts = [a + b for a, b in zip(tp_counts, batch_tp)]
@@ -179,7 +180,7 @@ def run_epoch(
         progress.set_postfix(loss=f"{losses[-1]:.4f}", miou=f"{ious[-1]:.4f}")
 
     per_class = {}
-    for name, tp, gt in zip(class_names, tp_counts, gt_counts):
+    for name, tp, gt in zip(metric_class_names, tp_counts, gt_counts):
         recall = float(tp / gt) if gt > 0 else 0.0
         per_class[name] = {"tp": int(tp), "gt": int(gt), "recall": recall}
 
@@ -211,22 +212,24 @@ def format_per_class_metrics(metrics: dict) -> str:
 
 
 def compute_class_weights(train_loader: DataLoader, num_classes: int, unlabeled_index: int) -> torch.Tensor:
-    """Estimate inverse-frequency class weights from the training labels."""
-    class_counts = np.zeros(num_classes, dtype=np.float64)
+    # """Estimate inverse-frequency class weights from the training labels."""
+    # class_counts = np.zeros(num_classes, dtype=np.float64)
 
-    for _images, labels in train_loader:
-        labels = labels.numpy()
-        valid = labels != unlabeled_index
-        valid_labels = labels[valid]
-        if valid_labels.size == 0:
-            continue
-        bincount = np.bincount(valid_labels.reshape(-1), minlength=num_classes)
-        class_counts += bincount[:num_classes]
+    # for _images, labels in train_loader:
+    #     labels = labels.numpy()
+    #     valid = labels != unlabeled_index
+    #     valid_labels = labels[valid]
+    #     if valid_labels.size == 0:
+    #         continue
+    #     bincount = np.bincount(valid_labels.reshape(-1), minlength=num_classes)
+    #     class_counts += bincount[:num_classes]
 
-    class_counts = np.maximum(class_counts, 1.0)
-    class_freq = class_counts / class_counts.sum()
-    class_weights = 1.0 / np.sqrt(class_freq)
-    class_weights = class_weights / class_weights.mean()
+    # class_counts = np.maximum(class_counts, 1.0)
+    # class_freq = class_counts / class_counts.sum()
+    # class_weights = 1.0 / np.sqrt(class_freq)
+    # class_weights = class_weights / class_weights.mean()
+
+    class_weights = np.array([1, 1, 1, 1]) # bg tgt goal arm
     return torch.tensor(class_weights, dtype=torch.float32)
 
 
