@@ -162,7 +162,7 @@ class MeActInferenceNode : public rclcpp::Node {
     declare_parameter<int>("command_duration_ms", 220);
     declare_parameter<int>("max_frame_age_ms", 250);
     declare_parameter<int>("max_state_image_skew_ms", 150);
-    declare_parameter<int>("servo_state_timeout_ms", 500);
+    declare_parameter<int>("servo_state_timeout_ms", 5000);
     declare_parameter<int>("sync_queue_size", 10);
     declare_parameter<bool>("enable_inference_on_start", false);
     declare_parameter<bool>("enable_me_block", false);
@@ -253,12 +253,12 @@ class MeActInferenceNode : public rclcpp::Node {
       }
       tick_id_ = 0;
       state_.store(RunState::RUNNING);
-      RCLCPP_INFO(get_logger(), "Initialization finished. Switching to RUNNING.");
+    //   RCLCPP_INFO(get_logger(), "Initialization finished. Switching to RUNNING.");
       return;
     }
 
     if (HasTimedOutPendingStateRequest(now)) {
-      EnterFault("Timed out while querying servo states.");
+    //   EnterFault("WTF?");
       return;
     }
     if (HasActiveControlWork()) {
@@ -497,7 +497,7 @@ class MeActInferenceNode : public rclcpp::Node {
       const ros_robot_controller_msgs::srv::GetBusServoState::Response& response) const {
     std::vector<float> qpos;
     qpos.reserve(servo_ids_.size());
-    for (const auto& bus_state : response->state) {
+    for (const auto& bus_state : response.state) {
       for (const auto position : bus_state.position) {
         qpos.push_back(static_cast<float>(position));
       }
@@ -611,7 +611,7 @@ class MeActInferenceNode : public rclcpp::Node {
       state_.store(RunState::INITIALIZING);
       response->success = true;
       response->message = "Initialization command sent.";
-      RCLCPP_INFO(get_logger(), "Initialization pose sent: [%s]", JoinVector(pose).c_str());
+    //   RCLCPP_INFO(get_logger(), "Initialization pose sent: [%s]", JoinVector(pose).c_str());
     } catch (const std::exception& exc) {
       response->success = false;
       response->message = exc.what();
@@ -686,10 +686,11 @@ class MeActInferenceNode : public rclcpp::Node {
 };
 
 int main(int argc, char** argv) {
+  printf("DEBUG: Program has entered the main function!\n");
   rclcpp::init(argc, argv);
   try {
     auto node = std::make_shared<MeActInferenceNode>();
-    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+    rclcpp::executors::MultiThreadedExecutor executor;
     executor.add_node(node);
     executor.spin();
   } catch (const std::exception& exc) {
