@@ -253,12 +253,12 @@ class MeActInferenceNode : public rclcpp::Node {
       }
       tick_id_ = 0;
       state_.store(RunState::RUNNING);
-    //   RCLCPP_INFO(get_logger(), "Initialization finished. Switching to RUNNING.");
+      RCLCPP_INFO(get_logger(), "Initialization finished. Switching to RUNNING.");
       return;
     }
 
     if (HasTimedOutPendingStateRequest(now)) {
-    //   EnterFault("WTF?");
+      EnterFault("Servo states request timeout");
       return;
     }
     if (HasActiveControlWork()) {
@@ -611,7 +611,7 @@ class MeActInferenceNode : public rclcpp::Node {
       state_.store(RunState::INITIALIZING);
       response->success = true;
       response->message = "Initialization command sent.";
-    //   RCLCPP_INFO(get_logger(), "Initialization pose sent: [%s]", JoinVector(pose).c_str());
+      RCLCPP_INFO(get_logger(), "Initialization pose sent: [%s]", JoinVector(pose).c_str());
     } catch (const std::exception& exc) {
       response->success = false;
       response->message = exc.what();
@@ -686,7 +686,7 @@ class MeActInferenceNode : public rclcpp::Node {
 };
 
 int main(int argc, char** argv) {
-  printf("DEBUG: Program has entered the main function!\n");
+  // printf("DEBUG: Program has entered the main function!\n");
   rclcpp::init(argc, argv);
   try {
     auto node = std::make_shared<MeActInferenceNode>();
