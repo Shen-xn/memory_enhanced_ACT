@@ -40,6 +40,7 @@ class ActPipeline {
       const std::vector<float>& qpos,
       bool use_me_block = true);
 
+  cv::Mat BuildDebugFourChannelImage(const cv::Mat& bgr, const cv::Mat& depth) const;
   void ResetMemory();
   bool UsesMemoryImageInput() const { return config_.use_memory_image_input; }
   bool HasMeBlock() const { return me_block_loaded_; }

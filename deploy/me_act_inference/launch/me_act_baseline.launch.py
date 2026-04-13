@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -11,6 +12,21 @@ def generate_launch_description():
                 "device",
                 default_value="cuda",
                 description="Torch device used by ACT. Use cpu only for debugging.",
+            ),
+            DeclareLaunchArgument(
+                "validate_servo_ids",
+                default_value="false",
+                description="Read servo IDs and reorder qpos by servo_ids for debugging.",
+            ),
+            DeclareLaunchArgument(
+                "debug_dump_dir",
+                default_value="",
+                description="Directory for online RGB/depth/BGRA debug dumps. Empty disables dumping.",
+            ),
+            DeclareLaunchArgument(
+                "debug_dump_every_n",
+                default_value="0",
+                description="Dump every N successful inference ticks. 0 disables dumping.",
             ),
             Node(
                 package="me_act_inference",
@@ -34,7 +50,9 @@ def generate_launch_description():
                         "sync_queue_size": 10,
                         "enable_inference_on_start": False,
                         "enable_me_block": False,
-                        "validate_servo_ids": False,
+                        "validate_servo_ids": ParameterValue(LaunchConfiguration("validate_servo_ids"), value_type=bool),
+                        "debug_dump_dir": LaunchConfiguration("debug_dump_dir"),
+                        "debug_dump_every_n": ParameterValue(LaunchConfiguration("debug_dump_every_n"), value_type=int),
                         "servo_ids": [1, 2, 3, 4, 5, 10],
                         "init_center": [500, 500, 180, 190, 500, 300],
                         "init_random_range": 40,

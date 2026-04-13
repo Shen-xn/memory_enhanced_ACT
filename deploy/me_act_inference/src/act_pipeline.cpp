@@ -80,6 +80,10 @@ std::vector<std::vector<float>> ActPipeline::PredictFromFourChannel(
   return TensorToTrajectory(actions.squeeze(0).to(torch::kCPU));
 }
 
+cv::Mat ActPipeline::BuildDebugFourChannelImage(const cv::Mat& bgr, const cv::Mat& depth) const {
+  return BuildFourChannelImage(bgr, depth, config_);
+}
+
 void ActPipeline::ResetMemory() {
   // State shape is [batch, class, channel, height, width] for memory images and
   // [batch, class, height, width] for scores. Batch is always 1 in deployment.

@@ -14,8 +14,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <optional>
+#include <opencv2/imgcodecs.hpp>
 #include <random>
 #include <sstream>
 #include <string>
@@ -134,6 +137,8 @@ class MeActInferenceNode : public rclcpp::Node {
     // lifetimes. `synced_stamp` is the newer RGB/depth stamp for age checks.
     cv::Mat rgb_bgr;
     cv::Mat depth_raw;
+    std::string rgb_encoding;
+    std::string depth_encoding;
     rclcpp::Time rgb_stamp;
     rclcpp::Time depth_stamp;
     rclcpp::Time synced_stamp;
@@ -175,6 +180,8 @@ class MeActInferenceNode : public rclcpp::Node {
     declare_parameter<bool>("enable_inference_on_start", false);
     declare_parameter<bool>("enable_me_block", false);
     declare_parameter<bool>("validate_servo_ids", false);
+    declare_parameter<std::string>("debug_dump_dir", "");
+    declare_parameter<int>("debug_dump_every_n", 0);
     declare_parameter<std::vector<int64_t>>("servo_ids", {1, 2, 3, 4, 5, 10});
     declare_parameter<std::vector<int64_t>>("init_center", {500, 500, 180, 190, 500, 300});
     declare_parameter<int>("init_random_range", 40);
@@ -199,6 +206,8 @@ class MeActInferenceNode : public rclcpp::Node {
     enable_inference_on_start_ = get_parameter("enable_inference_on_start").as_bool();
     enable_me_block_ = get_parameter("enable_me_block").as_bool();
     validate_servo_ids_ = get_parameter("validate_servo_ids").as_bool();
+    debug_dump_dir_ = get_parameter("debug_dump_dir").as_string();
+    debug_dump_every_n_ = get_parameter("debug_dump_every_n").as_int();
     servo_ids_ = ToIntVector(get_parameter("servo_ids").as_integer_array());
     init_center_ = ToIntVector(get_parameter("init_center").as_integer_array());
     init_random_range_ = get_parameter("init_random_range").as_int();
@@ -210,6 +219,9 @@ class MeActInferenceNode : public rclcpp::Node {
     }
     if (servo_ids_.size() != 6 || init_center_.size() != 6 || physical_min_.size() != 6 || physical_max_.size() != 6) {
       throw std::runtime_error("servo_ids/init_center/physical_min/physical_max must all have length 6.");
+    }
+    if (debug_dump_every_n_ < 0) {
+      throw std::runtime_error("debug_dump_every_n must be >= 0.");
     }
     ResetLastKnownQpos(ToFloatVector(init_center_));
   }
@@ -242,11 +254,29 @@ class MeActInferenceNode : public rclcpp::Node {
       SyncedFrame frame;
       frame.rgb_bgr = rgb_cv->image.clone();
       frame.depth_raw = depth_cv->image.clone();
+      frame.rgb_encoding = rgb_msg->encoding;
+      frame.depth_encoding = depth_msg->encoding;
       frame.rgb_stamp = rgb_msg->header.stamp;
       frame.depth_stamp = depth_msg->header.stamp;
       frame.synced_stamp =
           frame.depth_stamp.nanoseconds() > frame.rgb_stamp.nanoseconds() ? frame.depth_stamp : frame.rgb_stamp;
       frame.frame_id = ++frame_counter_;
+
+      if (!logged_image_info_) {
+        logged_image_info_ = true;
+        RCLCPP_INFO(
+            get_logger(),
+            "First image pair: rgb encoding=%s shape=%dx%d channels=%d | depth encoding=%s shape=%dx%d channels=%d type=%d",
+            frame.rgb_encoding.c_str(),
+            frame.rgb_bgr.cols,
+            frame.rgb_bgr.rows,
+            frame.rgb_bgr.channels(),
+            frame.depth_encoding.c_str(),
+            frame.depth_raw.cols,
+            frame.depth_raw.rows,
+            frame.depth_raw.channels(),
+            frame.depth_raw.type());
+      }
 
       std::lock_guard<std::mutex> lock(frame_mutex_);
       latest_frame_ = std::move(frame);
@@ -352,6 +382,7 @@ class MeActInferenceNode : public rclcpp::Node {
         return;
       }
 
+      MaybeDumpDebugTick(pending, servo_state, trajectory.front(), infer_finished);
       PublishServoCommand(trajectory.front(), command_duration_ms_, servo_state.observed);
 
       RCLCPP_INFO(
@@ -662,6 +693,55 @@ class MeActInferenceNode : public rclcpp::Node {
     last_known_qpos_ = qpos;
   }
 
+  bool ShouldDumpDebugTick(uint64_t tick) const {
+    return !debug_dump_dir_.empty() && debug_dump_every_n_ > 0 && tick % static_cast<uint64_t>(debug_dump_every_n_) == 0;
+  }
+
+  void MaybeDumpDebugTick(
+      const PendingInference& pending,
+      const ServoStateSnapshot& servo_state,
+      const std::vector<float>& command,
+      const rclcpp::Time& infer_finished) {
+    if (!ShouldDumpDebugTick(pending.tick)) {
+      return;
+    }
+
+    try {
+      std::filesystem::create_directories(debug_dump_dir_);
+      std::ostringstream stem;
+      stem << "tick_" << pending.tick << "_frame_" << pending.frame.frame_id;
+      const auto base = std::filesystem::path(debug_dump_dir_) / stem.str();
+
+      cv::imwrite((base.string() + "_rgb_bgr.png"), pending.frame.rgb_bgr);
+      cv::imwrite((base.string() + "_depth_raw.png"), pending.frame.depth_raw);
+      const cv::Mat four_channel = pipeline_->BuildDebugFourChannelImage(pending.frame.rgb_bgr, pending.frame.depth_raw);
+      cv::imwrite((base.string() + "_four_channel_bgra.png"), four_channel);
+
+      double depth_min = 0.0;
+      double depth_max = 0.0;
+      cv::minMaxLoc(pending.frame.depth_raw, &depth_min, &depth_max);
+
+      std::ofstream meta(base.string() + "_meta.txt", std::ios::out | std::ios::trunc);
+      meta << "tick=" << pending.tick << "\n";
+      meta << "frame=" << pending.frame.frame_id << "\n";
+      meta << "frame_age_ms=" << (infer_finished - pending.frame.synced_stamp).nanoseconds() / 1e6 << "\n";
+      meta << "rgb_encoding=" << pending.frame.rgb_encoding << "\n";
+      meta << "rgb_shape=" << pending.frame.rgb_bgr.cols << "x" << pending.frame.rgb_bgr.rows << "x" << pending.frame.rgb_bgr.channels() << "\n";
+      meta << "depth_encoding=" << pending.frame.depth_encoding << "\n";
+      meta << "depth_shape=" << pending.frame.depth_raw.cols << "x" << pending.frame.depth_raw.rows << "x" << pending.frame.depth_raw.channels() << "\n";
+      meta << "depth_type=" << pending.frame.depth_raw.type() << "\n";
+      meta << "depth_min=" << depth_min << "\n";
+      meta << "depth_max=" << depth_max << "\n";
+      meta << "qpos=[" << JoinVector(servo_state.qpos) << "]\n";
+      meta << "observed=[" << JoinVector(servo_state.observed) << "]\n";
+      meta << "cmd0=[" << JoinVector(command) << "]\n";
+
+      RCLCPP_INFO(get_logger(), "Debug dump written: %s", base.string().c_str());
+    } catch (const std::exception& exc) {
+      RCLCPP_WARN(get_logger(), "Failed to write debug dump: %s", exc.what());
+    }
+  }
+
   int ClampToPhysicalRange(int value, size_t index) const {
     return std::max(physical_min_[index], std::min(value, physical_max_[index]));
   }
@@ -774,6 +854,8 @@ class MeActInferenceNode : public rclcpp::Node {
   bool enable_inference_on_start_ = false;
   bool enable_me_block_ = false;
   bool validate_servo_ids_ = false;
+  std::string debug_dump_dir_;
+  int debug_dump_every_n_ = 0;
   std::vector<int> servo_ids_;
   std::vector<int> init_center_;
   int init_random_range_ = 100;
@@ -784,6 +866,7 @@ class MeActInferenceNode : public rclcpp::Node {
   std::atomic<uint64_t> control_generation_{0};
   uint64_t frame_counter_ = 0;
   uint64_t tick_id_ = 0;
+  bool logged_image_info_ = false;
 
   std::mutex frame_mutex_;
   std::mutex schedule_mutex_;
