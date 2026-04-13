@@ -115,6 +115,7 @@ deploy_artifacts_baseline/
 - `deploy_dir`: TorchScript artifact 目录。
 - `device`: `cuda` 或 `cpu`。
 - `enable_me_block`: memory launch 为 `true`，baseline launch 为 `false`。
+- `validate_servo_ids`: 默认 `false`。调试 qpos 顺序时可临时设为 `true`，节点会额外读取舵机 ID，并按 `servo_ids` 重排状态；代价是每个控制 tick 多一次 ID 查询。
 - `control_period_ms`: 控制 tick 周期。
 - `command_duration_ms`: 每次舵机命令写入的运动时长。
 - `init_command_duration_ms`: 初始化动作时长，默认 1500ms。

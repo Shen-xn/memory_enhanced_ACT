@@ -19,6 +19,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <rmw/qos_profiles.h>
@@ -146,6 +147,12 @@ class MeActInferenceNode : public rclcpp::Node {
     uint64_t generation = 0;
   };
 
+  struct ServoStateSnapshot {
+    std::vector<float> qpos;
+    std::vector<bool> observed;
+    std::vector<int> missing_ids;
+  };
+
   using SyncPolicy = message_filters::sync_policies::ApproximateTime<
       sensor_msgs::msg::Image,
       sensor_msgs::msg::Image>;
@@ -167,6 +174,7 @@ class MeActInferenceNode : public rclcpp::Node {
     declare_parameter<int>("sync_queue_size", 10);
     declare_parameter<bool>("enable_inference_on_start", false);
     declare_parameter<bool>("enable_me_block", false);
+    declare_parameter<bool>("validate_servo_ids", false);
     declare_parameter<std::vector<int64_t>>("servo_ids", {1, 2, 3, 4, 5, 10});
     declare_parameter<std::vector<int64_t>>("init_center", {500, 560, 120, 180, 500, 240});
     declare_parameter<int>("init_random_range", 100);
@@ -190,6 +198,7 @@ class MeActInferenceNode : public rclcpp::Node {
     sync_queue_size_ = get_parameter("sync_queue_size").as_int();
     enable_inference_on_start_ = get_parameter("enable_inference_on_start").as_bool();
     enable_me_block_ = get_parameter("enable_me_block").as_bool();
+    validate_servo_ids_ = get_parameter("validate_servo_ids").as_bool();
     servo_ids_ = ToIntVector(get_parameter("servo_ids").as_integer_array());
     init_center_ = ToIntVector(get_parameter("init_center").as_integer_array());
     init_random_range_ = get_parameter("init_random_range").as_int();
@@ -202,6 +211,7 @@ class MeActInferenceNode : public rclcpp::Node {
     if (servo_ids_.size() != 6 || init_center_.size() != 6 || physical_min_.size() != 6 || physical_max_.size() != 6) {
       throw std::runtime_error("servo_ids/init_center/physical_min/physical_max must all have length 6.");
     }
+    ResetLastKnownQpos(ToFloatVector(init_center_));
   }
 
   static std::vector<int> ToIntVector(const std::vector<int64_t>& values) {
@@ -209,6 +219,15 @@ class MeActInferenceNode : public rclcpp::Node {
     out.reserve(values.size());
     for (const auto value : values) {
       out.push_back(static_cast<int>(value));
+    }
+    return out;
+  }
+
+  static std::vector<float> ToFloatVector(const std::vector<int>& values) {
+    std::vector<float> out;
+    out.reserve(values.size());
+    for (const auto value : values) {
+      out.push_back(static_cast<float>(value));
     }
     return out;
   }
@@ -289,7 +308,7 @@ class MeActInferenceNode : public rclcpp::Node {
 
   void RunInferenceWithState(
       const PendingInference& pending,
-      const std::vector<float>& qpos,
+      const ServoStateSnapshot& servo_state,
       const rclcpp::Time& state_received) {
     if (state_.load() != RunState::RUNNING || control_generation_.load() != pending.generation) {
       return;
@@ -311,7 +330,7 @@ class MeActInferenceNode : public rclcpp::Node {
       {
         // Protect online memory state from concurrent reset services.
         std::lock_guard<std::mutex> lock(pipeline_mutex_);
-        trajectory = pipeline_->Predict(pending.frame.rgb_bgr, pending.frame.depth_raw, qpos, enable_me_block_);
+        trajectory = pipeline_->Predict(pending.frame.rgb_bgr, pending.frame.depth_raw, servo_state.qpos, enable_me_block_);
       }
       const auto infer_finished = get_clock()->now();
       if (state_.load() != RunState::RUNNING || control_generation_.load() != pending.generation) {
@@ -322,17 +341,18 @@ class MeActInferenceNode : public rclcpp::Node {
         return;
       }
 
-      PublishServoCommand(trajectory.front(), command_duration_ms_);
+      PublishServoCommand(trajectory.front(), command_duration_ms_, servo_state.observed);
 
       RCLCPP_INFO(
           get_logger(),
-          "tick=%llu frame=%llu frame_age=%.1fms state_wait=%.1fms infer=%.1fms qpos=[%s] cmd0=[%s]",
+          "tick=%llu frame=%llu frame_age=%.1fms state_wait=%.1fms infer=%.1fms qpos=[%s] observed=[%s] cmd0=[%s]",
           static_cast<unsigned long long>(pending.tick),
           static_cast<unsigned long long>(pending.frame.frame_id),
           (infer_finished - pending.frame.synced_stamp).nanoseconds() / 1e6,
           (state_received - pending.state_query_started).nanoseconds() / 1e6,
           (infer_finished - infer_started).nanoseconds() / 1e6,
-          JoinVector(qpos).c_str(),
+          JoinVector(servo_state.qpos).c_str(),
+          JoinVector(servo_state.observed).c_str(),
           JoinVector(trajectory.front()).c_str());
     } catch (const std::exception& exc) {
       EnterFault(exc.what());
@@ -421,6 +441,7 @@ class MeActInferenceNode : public rclcpp::Node {
     for (const auto servo_id : servo_ids_) {
       ros_robot_controller_msgs::msg::GetBusServoCmd cmd;
       cmd.id = static_cast<uint8_t>(servo_id);
+      cmd.get_id = validate_servo_ids_ ? 1 : 0;
       cmd.get_position = 1;
       request->cmd.push_back(cmd);
     }
@@ -461,57 +482,173 @@ class MeActInferenceNode : public rclcpp::Node {
       EnterFault(std::string("GetBusServoState future failed: ") + exc.what());
       return;
     }
-    if (!response || !response->success || response->state.empty()) {
-      RCLCPP_WARN(get_logger(), "GetBusServoState returned no valid state.");
-      EnterFault("GetBusServoState returned no valid state.");
+    if (!response || response->state.empty()) {
+      RCLCPP_WARN(get_logger(), "GetBusServoState returned no servo state. Skip this tick.");
+      FinishInferenceForResponse();
+      return;
+    }
+    if (!response->success) {
+      RCLCPP_WARN(get_logger(), "GetBusServoState returned success=false; trying to use any partial state in the response.");
+    }
+
+    const auto servo_state = ExtractServoPositions(*response);
+    if (!servo_state.has_value()) {
+      RCLCPP_WARN(get_logger(), "Failed to parse any usable servo position. Skip this tick.");
+      FinishInferenceForResponse();
       return;
     }
 
-    const auto qpos = ExtractServoPositions(*response);
-    if (!qpos.has_value()) {
-      EnterFault("Failed to parse servo state response.");
-      return;
-    }
-
-    RunInferenceWithState(request_context, *qpos, state_received);
+    RunInferenceWithState(request_context, *servo_state, state_received);
     FinishInferenceForResponse();
   }
 
-  std::optional<std::vector<float>> ExtractServoPositions(
-      const ros_robot_controller_msgs::srv::GetBusServoState::Response& response) const {
-    std::vector<float> qpos;
-    qpos.reserve(servo_ids_.size());
-    for (const auto& bus_state : response.state) {
-      for (const auto position : bus_state.position) {
-        qpos.push_back(static_cast<float>(position));
+  std::optional<ServoStateSnapshot> ExtractServoPositions(
+      const ros_robot_controller_msgs::srv::GetBusServoState::Response& response) {
+    if (response.state.empty()) {
+      return std::nullopt;
+    }
+    if (response.state.size() < servo_ids_.size()) {
+      RCLCPP_WARN(
+          get_logger(),
+          "Expected %zu servo states, but got %zu. Missing servos will keep their previous command.",
+          servo_ids_.size(),
+          response.state.size());
+    } else if (response.state.size() > servo_ids_.size()) {
+      RCLCPP_WARN(
+          get_logger(),
+          "Expected %zu servo states, but got %zu. Extra states will be ignored.",
+          servo_ids_.size(),
+          response.state.size());
+    }
+
+    ServoStateSnapshot snapshot;
+    {
+      std::lock_guard<std::mutex> lock(qpos_mutex_);
+      snapshot.qpos = last_known_qpos_;
+    }
+    snapshot.observed.assign(servo_ids_.size(), false);
+
+    if (snapshot.qpos.size() != servo_ids_.size()) {
+      snapshot.qpos = ToFloatVector(init_center_);
+    }
+
+    std::unordered_map<int, float> position_by_id;
+    std::vector<std::pair<size_t, float>> ordered_positions;
+    const size_t usable_state_count = std::min(response.state.size(), servo_ids_.size());
+    for (size_t i = 0; i < usable_state_count; ++i) {
+      const auto& bus_state = response.state[i];
+      if (bus_state.position.empty()) {
+        RCLCPP_WARN(get_logger(), "Servo state %zu has no position field. That servo will not be commanded this tick.", i);
+        continue;
+      }
+
+      // Hiwonder's current driver returns position=[value]. Some variants use
+      // flag/value arrays for set-state style messages; taking the last element
+      // keeps this parser focused on the actual servo position instead of
+      // accidentally flattening metadata into qpos.
+      const float position = static_cast<float>(bus_state.position.back());
+      ordered_positions.push_back({i, position});
+
+      if (validate_servo_ids_) {
+        if (bus_state.present_id.empty()) {
+          RCLCPP_WARN(
+              get_logger(),
+              "validate_servo_ids=true, but servo state %zu has no present_id field. It will only be used if no IDs are returned.",
+              i);
+        } else {
+          const int present_id = static_cast<int>(bus_state.present_id.back());
+          position_by_id[present_id] = position;
+        }
       }
     }
 
-    if (qpos.size() != servo_ids_.size()) {
-      RCLCPP_WARN(
-          get_logger(),
-          "Expected %zu servo positions, but got %zu from GetBusServoState.",
-          servo_ids_.size(),
-          qpos.size());
+    size_t observed_count = 0;
+    if (validate_servo_ids_ && !position_by_id.empty()) {
+      for (size_t i = 0; i < servo_ids_.size(); ++i) {
+        const auto found = position_by_id.find(servo_ids_[i]);
+        if (found == position_by_id.end()) {
+          snapshot.missing_ids.push_back(servo_ids_[i]);
+          continue;
+        }
+        snapshot.qpos[i] = found->second;
+        snapshot.observed[i] = true;
+        observed_count++;
+      }
+    } else {
+      for (const auto& [index, position] : ordered_positions) {
+        snapshot.qpos[index] = position;
+        snapshot.observed[index] = true;
+        observed_count++;
+      }
+      for (size_t i = usable_state_count; i < servo_ids_.size(); ++i) {
+        snapshot.missing_ids.push_back(servo_ids_[i]);
+      }
+    }
+
+    for (size_t i = 0; i < usable_state_count; ++i) {
+      if (!snapshot.observed[i] &&
+          std::find(snapshot.missing_ids.begin(), snapshot.missing_ids.end(), servo_ids_[i]) == snapshot.missing_ids.end()) {
+        snapshot.missing_ids.push_back(servo_ids_[i]);
+      }
+    }
+
+    if (observed_count == 0) {
+      RCLCPP_WARN(get_logger(), "GetBusServoState response contained no usable servo positions.");
       return std::nullopt;
     }
 
-    return qpos;
+    {
+      std::lock_guard<std::mutex> lock(qpos_mutex_);
+      if (last_known_qpos_.size() != servo_ids_.size()) {
+        last_known_qpos_ = snapshot.qpos;
+      }
+      for (size_t i = 0; i < servo_ids_.size(); ++i) {
+        if (snapshot.observed[i]) {
+          last_known_qpos_[i] = snapshot.qpos[i];
+        }
+      }
+    }
+
+    if (!snapshot.missing_ids.empty()) {
+      RCLCPP_WARN(
+          get_logger(),
+          "Partial servo state: observed=%zu/%zu missing_ids=[%s]. Missing servos will not receive a command this tick.",
+          observed_count,
+          servo_ids_.size(),
+          JoinVector(snapshot.missing_ids).c_str());
+    }
+
+    return snapshot;
   }
 
-  void PublishServoCommand(const std::vector<float>& action, int duration_ms) {
+  void PublishServoCommand(
+      const std::vector<float>& action,
+      int duration_ms,
+      const std::vector<bool>& command_mask = {}) {
     ros_robot_controller_msgs::msg::ServosPosition msg;
     msg.duration = static_cast<float>(duration_ms) / 1000.0f;
     msg.position.reserve(servo_ids_.size());
 
     for (size_t i = 0; i < servo_ids_.size(); ++i) {
+      if (!command_mask.empty() && (i >= command_mask.size() || !command_mask[i])) {
+        continue;
+      }
       ros_robot_controller_msgs::msg::ServoPosition servo;
       servo.id = servo_ids_[i];
       servo.position = ClampToPhysicalRange(static_cast<int>(std::lround(action[i])), i);
       msg.position.push_back(servo);
     }
 
+    if (msg.position.empty()) {
+      RCLCPP_WARN(get_logger(), "No servo command published because no servo state was observed this tick.");
+      return;
+    }
     servo_command_pub_->publish(msg);
+  }
+
+  void ResetLastKnownQpos(const std::vector<float>& qpos) {
+    std::lock_guard<std::mutex> lock(qpos_mutex_);
+    last_known_qpos_ = qpos;
   }
 
   int ClampToPhysicalRange(int value, size_t index) const {
@@ -582,6 +719,7 @@ class MeActInferenceNode : public rclcpp::Node {
       InvalidateControlWork();
       const auto pose = SampleInitializationPose();
       PublishServoCommand(pose, init_command_duration_ms_);
+      ResetLastKnownQpos(pose);
       {
         std::lock_guard<std::mutex> lock(pipeline_mutex_);
         pipeline_->ResetMemory();
@@ -624,6 +762,7 @@ class MeActInferenceNode : public rclcpp::Node {
   int sync_queue_size_ = 10;
   bool enable_inference_on_start_ = false;
   bool enable_me_block_ = false;
+  bool validate_servo_ids_ = false;
   std::vector<int> servo_ids_;
   std::vector<int> init_center_;
   int init_random_range_ = 100;
@@ -640,10 +779,12 @@ class MeActInferenceNode : public rclcpp::Node {
   // Guards ActPipeline because it owns mutable recurrent me_block state.
   std::mutex pipeline_mutex_;
   std::mutex pending_state_mutex_;
+  std::mutex qpos_mutex_;
   std::optional<SyncedFrame> latest_frame_;
   std::optional<PendingInference> pending_state_request_;
   bool inference_in_progress_ = false;
   std::mt19937 rng_;
+  std::vector<float> last_known_qpos_;
 
   std::unique_ptr<ActPipeline> pipeline_;
 
