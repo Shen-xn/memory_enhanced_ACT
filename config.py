@@ -24,7 +24,7 @@ class Config:
         self.RESUME_CKPT_PATH = ""
 
         self.NUM_EPOCHS = 40
-        self.BATCH_SIZE = 16
+        self.BATCH_SIZE = 8
         self.NUM_WORKERS = 16
         self.FUTURE_STEPS = 10
 

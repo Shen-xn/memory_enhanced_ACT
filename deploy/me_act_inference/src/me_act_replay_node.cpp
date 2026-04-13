@@ -1,4 +1,5 @@
 #include <cv_bridge/cv_bridge.h>
+#include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/image_encodings.hpp>
@@ -93,6 +94,7 @@ class MeActReplayNode : public rclcpp::Node {
     declare_parameter<int>("command_duration_ms", 220);
     declare_parameter<bool>("loop", false);
     declare_parameter<bool>("start_on_launch", false);
+    declare_parameter<bool>("show_window", false);
     declare_parameter<std::vector<int64_t>>("servo_ids", {1, 2, 3, 4, 5, 10});
   }
 
@@ -108,6 +110,7 @@ class MeActReplayNode : public rclcpp::Node {
     command_duration_ms_ = get_parameter("command_duration_ms").as_int();
     loop_ = get_parameter("loop").as_bool();
     running_ = get_parameter("start_on_launch").as_bool();
+    show_window_ = get_parameter("show_window").as_bool();
     servo_ids_ = ToIntVector(get_parameter("servo_ids").as_integer_array());
 
     if (task_dir_.empty()) {
@@ -115,6 +118,9 @@ class MeActReplayNode : public rclcpp::Node {
     }
     if (servo_ids_.size() != 6) {
       throw std::runtime_error("servo_ids must have length 6.");
+    }
+    if (show_window_) {
+      cv::namedWindow("me_act_replay_rgb", cv::WINDOW_NORMAL);
     }
   }
 
@@ -232,6 +238,10 @@ class MeActReplayNode : public rclcpp::Node {
     }
 
     PublishImages(rgb, depth);
+    if (show_window_) {
+      cv::imshow("me_act_replay_rgb", rgb);
+      cv::waitKey(1);
+    }
     PublishServoCommand(qpos);
     frame_index_++;
   }
@@ -294,6 +304,7 @@ class MeActReplayNode : public rclcpp::Node {
   int command_duration_ms_ = 220;
   bool loop_ = false;
   bool running_ = false;
+  bool show_window_ = false;
   std::vector<int> servo_ids_;
 
   std::vector<std::string> rgb_paths_;
