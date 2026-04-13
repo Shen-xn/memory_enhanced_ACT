@@ -17,6 +17,7 @@ struct DeployConfig {
   float depth_clip_max = 800.0f;
   int state_dim = 6;
   int num_queries = 10;
+  int image_channels = 4;
   bool use_memory_image_input = false;
   bool has_me_block = false;
   int me_block_num_classes = 3;

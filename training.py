@@ -230,7 +230,8 @@ def main():
         future_steps=cfg.FUTURE_STEPS,
         use_memory_image_input=cfg.USE_MEMORY_IMAGE_INPUT,
         batch_size=cfg.BATCH_SIZE,
-        num_workers=cfg.NUM_WORKERS
+        num_workers=cfg.NUM_WORKERS,
+        image_channels=cfg.IMAGE_CHANNELS,
     )
     
     # 2. 初始化模型和优化器

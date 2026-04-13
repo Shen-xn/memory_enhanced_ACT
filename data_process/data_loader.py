@@ -45,6 +45,17 @@ def read_bgra_image(path):
     return image.astype(np.float32) / 255.0
 
 
+def select_image_channels(image, image_channels):
+    """Return the visual channels requested by the ACT model.
+
+    Disk data stays in one stable BGRA format. RGB baselines simply ignore the
+    depth channel here, while RGBD and memory models keep all four channels.
+    """
+    if image_channels not in (3, 4):
+        raise ValueError(f"image_channels must be 3 or 4, got {image_channels}")
+    return image[:, :, :image_channels]
+
+
 def _preview_values(values, limit=8):
     values = sorted(values)
     shown = values[:limit]
@@ -155,11 +166,17 @@ class ImitationDataset(Dataset):
         seed=42,
         normalize_joints=True,
         strict_alignment=True,
-        joint_min_max=None
+        joint_min_max=None,
+        image_channels=4,
     ):
         self.data_root = data_root
         self.future_steps = future_steps
         self.use_memory_image_input = use_memory_image_input
+        self.image_channels = int(image_channels)
+        if self.image_channels not in (3, 4):
+            raise ValueError(f"image_channels must be 3 or 4, got {self.image_channels}")
+        if self.use_memory_image_input and self.image_channels != 4:
+            raise ValueError("Memory-image ACT currently requires image_channels=4.")
         self.mode = mode
         self.normalize_joints = normalize_joints
         self.strict_alignment = strict_alignment
@@ -432,6 +449,9 @@ class ImitationDataset(Dataset):
             m_img_np = _warp_bgra(m_img_np, angle, scale, tx, ty)
             img_np = _augment_rgb_channels(img_np)
 
+        img_np = select_image_channels(img_np, self.image_channels)
+        m_img_np = select_image_channels(m_img_np, self.image_channels)
+
         img = torch.from_numpy(img_np.copy()).permute(2, 0, 1)
         m_img = torch.from_numpy(m_img_np.copy()).permute(2, 0, 1)
 
@@ -447,7 +467,8 @@ def get_data_loaders(
     future_steps=10,
     use_memory_image_input=False,
     batch_size=8,
-    num_workers=0
+    num_workers=0,
+    image_channels=4,
 ):
     """Create train/val dataloaders with the same alignment and normalization rules."""
     train_dataset = ImitationDataset(
@@ -455,13 +476,15 @@ def get_data_loaders(
         future_steps,
         use_memory_image_input=use_memory_image_input,
         mode="train",
+        image_channels=image_channels,
     )
     val_dataset = ImitationDataset(
         data_root,
         future_steps,
         use_memory_image_input=use_memory_image_input,
         mode="val",
-        joint_min_max=train_dataset.joint_min_max
+        joint_min_max=train_dataset.joint_min_max,
+        image_channels=image_channels,
     )
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)

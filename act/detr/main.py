@@ -36,6 +36,12 @@ def get_args_parser():
         type=bool,
         help="If true, backbone is adapted to 4-channel input",
     )
+    parser.add_argument(
+        "--image_channels",
+        default=None,
+        type=int,
+        help="ACT visual input channels. Kept alongside depth_channel for checkpoint readability.",
+    )
     parser.add_argument("--backbone", default="resnet18", type=str, help="Name of the convolutional backbone to use")
     parser.add_argument(
         "--dilation",
@@ -99,6 +105,8 @@ def _build_args_object(args_override):
         defaults[action.dest] = action.default
 
     defaults.update(args_override)
+    if defaults.get("image_channels") is not None:
+        defaults["depth_channel"] = int(defaults["image_channels"]) == 4
     return ArgsObject(defaults)
 
 

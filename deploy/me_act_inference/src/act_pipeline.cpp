@@ -104,6 +104,9 @@ DeployConfig ActPipeline::LoadConfig(const std::string& path) {
   fs["depth_clip_max"] >> cfg.depth_clip_max;
   fs["state_dim"] >> cfg.state_dim;
   fs["num_queries"] >> cfg.num_queries;
+  if (!fs["image_channels"].empty()) {
+    fs["image_channels"] >> cfg.image_channels;
+  }
   int use_memory = 0;
   int has_me_block = 0;
   fs["use_memory_image_input"] >> use_memory;

@@ -48,9 +48,11 @@ class Config:
         # ===================== 模型参数（显式顶层定义，方便引用） =====================
         self.CAMERA_NAMES = ["gemini"]
         # Current modes:
-        # - False + DEPTH_CHANNEL=True: RGBD baseline
-        # - True  + DEPTH_CHANNEL=True: RGBD + offline/online memory image
+        # - IMAGE_CHANNELS=3 + USE_MEMORY_IMAGE_INPUT=False: RGB baseline
+        # - IMAGE_CHANNELS=4 + USE_MEMORY_IMAGE_INPUT=False: RGBD baseline
+        # - IMAGE_CHANNELS=4 + USE_MEMORY_IMAGE_INPUT=True: RGBD + memory image
         self.USE_MEMORY_IMAGE_INPUT = False
+        self.IMAGE_CHANNELS = 4
         self.DEPTH_CHANNEL = True
         self.BACKBONE = "resnet18"
         self.POSITION_EMBEDDING = "sine"
@@ -93,10 +95,17 @@ class Config:
         self.NUM_QUERIES = self.FUTURE_STEPS
         self.CHUNK_SIZE = self.FUTURE_STEPS
         self.CKPT_DIR = self.EXP_LOG_DIR or ""
+        self.IMAGE_CHANNELS = int(getattr(self, "IMAGE_CHANNELS", 4))
+        if self.IMAGE_CHANNELS not in (3, 4):
+            raise ValueError(f"IMAGE_CHANNELS must be 3 or 4, got {self.IMAGE_CHANNELS}")
+        if self.USE_MEMORY_IMAGE_INPUT and self.IMAGE_CHANNELS != 4:
+            raise ValueError("USE_MEMORY_IMAGE_INPUT=True currently requires IMAGE_CHANNELS=4.")
+        self.DEPTH_CHANNEL = self.IMAGE_CHANNELS == 4
 
         self.MODEL_PARAMS = {
             "camera_names": self.CAMERA_NAMES,
             "use_memory_image_input": self.USE_MEMORY_IMAGE_INPUT,
+            "image_channels": self.IMAGE_CHANNELS,
             "depth_channel": self.DEPTH_CHANNEL,
             "backbone": self.BACKBONE,
             "position_embedding": self.POSITION_EMBEDDING,
@@ -135,6 +144,17 @@ class Config:
         for k, v in ckpt_config.items():
             if hasattr(self, k):
                 setattr(self, k, v)
+
+        # Older checkpoints may only know DEPTH_CHANNEL. Some intermediate
+        # exports may only carry the mirrored MODEL_PARAMS value.
+        model_params = ckpt_config.get("MODEL_PARAMS") or {}
+        if "IMAGE_CHANNELS" not in ckpt_config:
+            if "image_channels" in model_params:
+                self.IMAGE_CHANNELS = int(model_params["image_channels"])
+            elif "DEPTH_CHANNEL" in ckpt_config:
+                self.IMAGE_CHANNELS = 4 if bool(ckpt_config["DEPTH_CHANNEL"]) else 3
+            elif "depth_channel" in model_params:
+                self.IMAGE_CHANNELS = 4 if bool(model_params["depth_channel"]) else 3
         self.refresh_model_params()
 
 

@@ -1,5 +1,14 @@
 # Deploy
 
+## Visual Modes
+
+导出的 ACT artifact 会记录 `image_channels`：
+
+- `image_channels=3`: RGB baseline。部署侧仍接收 BGRA 图像，但 TorchScript wrapper 只取 RGB 三通道喂给 ACT。
+- `image_channels=4`: RGBD baseline 或 RGBD+memory。TorchScript wrapper 取 RGBD 四通道。
+
+ROS2 节点和 C++ preprocessing 仍统一构造 BGRA，这样 RGB、RGBD、RGBD+memory 三种模型共用同一套相机同步和预处理逻辑。不要为了 RGB baseline 另改 ROS 输入路径。
+
 `deploy/` 负责两件事：
 
 1. 导出 TorchScript

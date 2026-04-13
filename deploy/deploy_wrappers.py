@@ -22,13 +22,16 @@ def _tensor_1d(values) -> torch.Tensor:
 class _BaseActInferenceWrapper(nn.Module):
     """Shared preprocessing for ACT inference wrappers."""
 
-    def __init__(self, model: nn.Module, joint_min, joint_rng):
+    def __init__(self, model: nn.Module, joint_min, joint_rng, image_channels: int = 4):
         super().__init__()
+        if image_channels not in (3, 4):
+            raise ValueError(f"image_channels must be 3 or 4, got {image_channels}")
         self.model = model.eval()
+        self.image_channels = int(image_channels)
         self.register_buffer("joint_min", _tensor_1d(joint_min).view(1, -1))
         self.register_buffer("joint_rng", _tensor_1d(joint_rng).view(1, -1))
-        self.register_buffer("image_mean", _tensor_1d([0.485, 0.456, 0.406, 0.5]).view(1, 4, 1, 1))
-        self.register_buffer("image_std", _tensor_1d([0.229, 0.224, 0.225, 0.5]).view(1, 4, 1, 1))
+        self.register_buffer("image_mean", _tensor_1d([0.485, 0.456, 0.406, 0.5][: self.image_channels]).view(1, self.image_channels, 1, 1))
+        self.register_buffer("image_std", _tensor_1d([0.229, 0.224, 0.225, 0.5][: self.image_channels]).view(1, self.image_channels, 1, 1))
 
     def _normalize_qpos(self, qpos: torch.Tensor) -> torch.Tensor:
         return (qpos - self.joint_min) / self.joint_rng
@@ -37,8 +40,9 @@ class _BaseActInferenceWrapper(nn.Module):
         return actions * self.joint_rng.view(1, 1, -1) + self.joint_min.view(1, 1, -1)
 
     def _normalize_bgra_image(self, image: torch.Tensor) -> torch.Tensor:
-        """Convert BGRA float image to RGBD normalized tensor expected by ACT."""
+        """Convert deployment BGRA into the RGB/RGBD tensor expected by ACT."""
         image = image[:, [2, 1, 0, 3]]
+        image = image[:, : self.image_channels]
         return (image - self.image_mean) / self.image_std
 
 

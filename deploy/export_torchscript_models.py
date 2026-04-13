@@ -65,6 +65,12 @@ def normalize_act_config(payload: Dict) -> Dict:
         use_memory = _pick(payload, "use_memory_image_input")
     if use_memory is None:
         use_memory = bool(payload.get("ME_BLOCK") or _pick(payload, "me_block", False))
+    image_channels = payload.get("IMAGE_CHANNELS", _pick(payload, "image_channels"))
+    if image_channels is None:
+        image_channels = 4 if bool(payload.get("DEPTH_CHANNEL", _pick(payload, "depth_channel", True))) else 3
+    image_channels = int(image_channels)
+    if image_channels not in (3, 4):
+        raise ValueError(f"Unsupported ACT image_channels={image_channels}; expected 3 or 4.")
 
     return {
         "lr": payload.get("LR", 1e-4),
@@ -73,7 +79,8 @@ def normalize_act_config(payload: Dict) -> Dict:
         "kl_weight": payload.get("KL_WEIGHT", _pick(payload, "kl_weight", 1.0)),
         "camera_names": payload.get("CAMERA_NAMES", _pick(payload, "camera_names", ["gemini"])),
         "use_memory_image_input": bool(use_memory),
-        "depth_channel": payload.get("DEPTH_CHANNEL", _pick(payload, "depth_channel", True)),
+        "image_channels": image_channels,
+        "depth_channel": image_channels == 4,
         "backbone": payload.get("BACKBONE", _pick(payload, "backbone", "resnet18")),
         "position_embedding": payload.get("POSITION_EMBEDDING", _pick(payload, "position_embedding", "sine")),
         "dilation": payload.get("DILATION", _pick(payload, "dilation", False)),
@@ -140,11 +147,15 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     act_policy, act_config = load_act_policy(args.act_checkpoint, device=device)
-    use_memory_image_input = bool(normalize_act_config(act_config)["use_memory_image_input"])
+    normalized_act_config = normalize_act_config(act_config)
+    use_memory_image_input = bool(normalized_act_config["use_memory_image_input"])
+    image_channels = int(normalized_act_config["image_channels"])
     joint_stats = get_fixed_joint_stats()
 
     if args.me_block_checkpoint and not use_memory_image_input:
         raise ValueError("ACT checkpoint is a single-image model. Do not export me_block for a baseline ACT deployment.")
+    if use_memory_image_input and image_channels != 4:
+        raise ValueError("Memory-image ACT deployment requires image_channels=4.")
     if use_memory_image_input and not args.me_block_checkpoint:
         raise ValueError(
             "ACT checkpoint expects memory_image input. Current deploy pipeline requires --me-block-checkpoint "
@@ -156,6 +167,7 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
             act_policy.model,
             joint_min=joint_stats["min"],
             joint_rng=joint_stats["rng"],
+            image_channels=image_channels,
         ).to(device)
         act_examples = (
             torch.zeros(1, act_policy.model.action_head.out_features, device=device),
@@ -167,6 +179,7 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
             act_policy.model,
             joint_min=joint_stats["min"],
             joint_rng=joint_stats["rng"],
+            image_channels=image_channels,
         ).to(device)
         act_examples = (
             torch.zeros(1, act_policy.model.action_head.out_features, device=device),
@@ -200,6 +213,7 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
         "depth_clip_max": float(DEPTH_CLIP_MAX),
         "state_dim": int(act_policy.model.action_head.out_features),
         "num_queries": int(act_policy.model.num_queries),
+        "image_channels": int(image_channels),
         "use_memory_image_input": use_memory_image_input,
         "has_me_block": has_me_block,
         "me_block_num_classes": int(num_me_classes),
@@ -215,6 +229,7 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
         "use_memory_image_input": use_memory_image_input,
         "has_me_block": has_me_block,
         "me_block_num_classes": int(num_me_classes),
+        "image_channels": int(image_channels),
     }
 
 

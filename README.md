@@ -1,5 +1,15 @@
 # memory_enhanced_ACT
 
+## ACT Visual Modes
+
+当前 ACT 主线支持三种视觉模式，尽量共用同一套 dataloader、backbone、policy 和部署 wrapper：
+
+- RGB baseline: `USE_MEMORY_IMAGE_INPUT=False`, `IMAGE_CHANNELS=3`
+- RGBD baseline: `USE_MEMORY_IMAGE_INPUT=False`, `IMAGE_CHANNELS=4`
+- RGBD + memory: `USE_MEMORY_IMAGE_INPUT=True`, `IMAGE_CHANNELS=4`
+
+磁盘数据和 ROS 部署入口仍统一使用 `four_channel` / BGRA。RGB baseline 不需要重做数据，只是在 dataloader 和 TorchScript wrapper 里忽略 depth 通道。旧 checkpoint 如果没有 `IMAGE_CHANNELS` 字段，会继续按 `DEPTH_CHANNEL` 恢复，默认保持旧的 4 通道行为。
+
 这个仓库现在按两条主线来理解最清楚：
 
 1. ACT 主训练

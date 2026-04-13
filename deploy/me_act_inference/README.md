@@ -8,6 +8,10 @@
 
 ## 运行模式
 
+### RGB baseline
+
+RGB baseline 的 artifact 会在 `deploy_config.yml` 里写入 `image_channels: 3`。ROS 节点仍然构造 BGRA 输入，TorchScript wrapper 会忽略 depth 通道，所以相机同步和 C++ preprocessing 不需要分叉。
+
 ### baseline ACT
 
 ```text
