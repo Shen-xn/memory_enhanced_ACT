@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Build four-channel BGRA training images from aligned RGB/depth folders.
 
-Run this after data_process_1.py. It assumes `rgb/` and `depth_normalized/`
-already have the same frame ids and refuses to pair by list position when they
-do not.
+This module is called by prepare_act_data.py. It assumes `rgb/` and
+`depth_normalized/` already have the same frame ids and refuses to pair by list
+position when they do not.
 """
 
 import os
@@ -143,7 +143,7 @@ def process_single_task(task_dir):
     rgb_frames = set(rgb_map.keys())
     depth_frames = set(depth_map.keys())
     if rgb_frames != depth_frames:
-        print("[WARN] RGB 与 depth_normalized 帧号不一致，请先运行 data_process_1.py 修正。")
+        print("[WARN] RGB 与 depth_normalized 帧号不一致，请先运行 python prepare_act_data.py 修正。")
         print(f"   RGB 多出: {sorted(rgb_frames - depth_frames)[:20]}")
         print(f"   Depth 多出: {sorted(depth_frames - rgb_frames)[:20]}")
         return
@@ -173,26 +173,3 @@ def process_single_task(task_dir):
 
     print(f"[OK] 完成: {success}/{n_pairs}")
 
-def batch_process_all_tasks(data_root):
-    """Generate four_channel images for every task under the data root."""
-    task_dirs = natural_sort(glob.glob(os.path.join(data_root, "./data/task_*")))
-    task_dirs = [d for d in task_dirs if os.path.isdir(d) and "task_copy" not in d]
-
-    if not task_dirs:
-        print("[WARN] 未找到 task_*")
-        return
-
-    print(f"[INFO] 找到 {len(task_dirs)} 个任务")
-    print(f"[INFO] 目标尺寸: {TARGET_WIDTH}×{TARGET_HEIGHT}")
-    print(f"[INFO] Padding: 左{PAD_LEFT}px, 上{PAD_TOP}px")
-    print("="*60)
-
-    for td in task_dirs:
-        process_single_task(td)
-
-    print("\n[OK] 全部生成完成！")
-
-
-if __name__ == "__main__":
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    batch_process_all_tasks(SCRIPT_DIR)

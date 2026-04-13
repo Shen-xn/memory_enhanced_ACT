@@ -20,9 +20,11 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from data_process.exclusions import EXCLUSION_FILENAME, load_excluded_tasks
 
-FIXED_JOINT_MIN = np.array([0, 0, 0, 0, 0, 100], dtype=np.float32)
-FIXED_JOINT_MAX = np.array([1000, 1000, 1000, 1000, 1000, 700], dtype=np.float32)
+
+FIXED_JOINT_MIN = np.array([0, 100, 50, 50, 50, 150], dtype=np.float32)
+FIXED_JOINT_MAX = np.array([1000, 800, 650, 900, 950, 700], dtype=np.float32)
 FIXED_JOINT_RNG = FIXED_JOINT_MAX - FIXED_JOINT_MIN
 
 
@@ -63,7 +65,7 @@ def _preview_values(values, limit=8):
     return f"{shown}{suffix}"
 
 
-def _frame_id_from_path(path, fallback_index):
+def _frame_id_from_path(path):
     """Extract the numeric frame id used to align images with CSV rows."""
     stem = os.path.splitext(os.path.basename(path))[0]
     if stem.isdigit():
@@ -71,14 +73,14 @@ def _frame_id_from_path(path, fallback_index):
     match = re.search(r"\d+", stem)
     if match:
         return int(match.group(0))
-    return int(fallback_index)
+    raise ValueError(f"Image filename has no numeric frame id: {path}")
 
 
 def _index_image_paths_by_frame(paths):
     frame_to_path = {}
     duplicates = []
-    for fallback_index, path in enumerate(paths):
-        frame_id = _frame_id_from_path(path, fallback_index)
+    for path in paths:
+        frame_id = _frame_id_from_path(path)
         if frame_id in frame_to_path:
             duplicates.append(frame_id)
         frame_to_path[frame_id] = path
@@ -146,6 +148,22 @@ def _source_group_key(task_path):
     return task_name
 
 
+def _format_joint_range_errors(samples, joint_min, joint_max, limit=8):
+    """Build a compact error message for samples outside fixed joint limits."""
+    bad = []
+    for sample in samples:
+        values = np.vstack([sample["curr"].reshape(1, -1), sample["future"]])
+        mask = (values < joint_min.reshape(1, -1)) | (values > joint_max.reshape(1, -1))
+        if not mask.any():
+            continue
+        cols = sorted({["j1", "j2", "j3", "j4", "j5", "j10"][idx] for idx in np.where(mask)[1]})
+        bad.append(f"{os.path.basename(sample['task'])}:frame={sample['frame_index']} cols={cols}")
+        if len(bad) >= limit:
+            break
+    suffix = " ..." if len(bad) >= limit else ""
+    return "; ".join(bad) + suffix
+
+
 class ImitationDataset(Dataset):
     """Dataset for ACT action-chunk training.
 
@@ -190,6 +208,7 @@ class ImitationDataset(Dataset):
             self.joint_min_max = get_fixed_joint_stats()
         
         if normalize_joints:
+            self._validate_joint_ranges()
             self._normalize_joints()
 
     def _align_dataframe_and_images(self, task_name, img_paths, df, joint_cols):
@@ -227,7 +246,7 @@ class ImitationDataset(Dataset):
                 f"{task_name} 的 four_channel 与 states_filtered.csv 不一致。"
                 f"CSV 有但图片缺失: {_preview_values(missing_images)}；"
                 f"图片有但 CSV 缺失: {_preview_values(extra_images)}。"
-                "请先运行 data_process_1.py 修正 rgb/depth/csv，再运行 data_process_2.py 重建 four_channel。"
+                "请先运行 python prepare_act_data.py 重新生成并验证数据。"
             )
 
         keep_mask = [int(frame_id) in frame_to_image for frame_id in frame_ids]
@@ -241,6 +260,17 @@ class ImitationDataset(Dataset):
         samples = []
         task_dirs = sorted(glob.glob(os.path.join(self.data_root, "task*")))
         task_dirs = [d for d in task_dirs if os.path.isdir(d) and "task_copy" not in d]
+        excluded_tasks = load_excluded_tasks(self.data_root)
+        if excluded_tasks:
+            before_count = len(task_dirs)
+            task_dirs = [
+                d for d in task_dirs
+                if os.path.basename(d) not in excluded_tasks
+            ]
+            print(
+                f"[WARN] 根据 {EXCLUSION_FILENAME} 跳过 {before_count - len(task_dirs)} 个任务: "
+                f"{_preview_values(excluded_tasks.keys())}"
+            )
 
         print(f"找到 {len(task_dirs)} 个任务文件夹")
 
@@ -431,6 +461,19 @@ class ImitationDataset(Dataset):
             s["curr"] = (s["curr"] - jmin) / jrng
             s["future"] = (s["future"] - jmin) / jrng
 
+    def _validate_joint_ranges(self):
+        """Fail fast if data falls outside the fixed physical joint limits."""
+        jmin = self.joint_min_max["min"]
+        jmax = self.joint_min_max["max"]
+        bad_message = _format_joint_range_errors(self.samples, jmin, jmax)
+        if bad_message:
+            raise ValueError(
+                "states_filtered.csv contains joint values outside the fixed physical limits. "
+                f"Limits min={jmin.tolist()} max={jmax.tolist()}. "
+                f"Examples: {bad_message}. "
+                "Fix/remove those task folders or adjust the agreed physical limits before training."
+            )
+
     def __len__(self):
         return len(self.samples)
 
@@ -493,35 +536,3 @@ def get_data_loaders(
     print("\n数据加载器创建完成！")
     return train_loader, val_loader
 
-
-# ====================== 测试 ======================
-if __name__ == "__main__":
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    
-    train_loader, val_loader = get_data_loaders(
-        data_root=os.path.join(SCRIPT_DIR, "./data"),
-        future_steps=10,
-        batch_size=16,
-        num_workers=0
-    )
-
-    print("\n======= 训练集测试 =======")
-    for imgs, currs, futures, m_imgs, obsts in train_loader:
-        print("主图像:", imgs.shape)
-        print("当前关节:", currs.shape)
-        print("未来动作:", futures.shape)
-        print("Memory图像:", m_imgs.shape)
-        print("障碍标签:", obsts)
-        print("Memory 是否全零:", (torch.sum(m_imgs, (1, 2, 3)) == 0).unsqueeze(0).unsqueeze(2))
-        break
-        
-
-    print("\n======= 验证集测试 =======")
-    for imgs, currs, futures, m_imgs, obsts in val_loader:
-        print("主图像:", imgs.shape)
-        print("当前关节:", currs.shape)
-        print("未来动作:", futures.shape)
-        print("Memory图像:", m_imgs.shape)
-        print("障碍标签:", obsts.shape)
-        print("Memory 是否全零:", torch.all(m_imgs == 0))
-        break

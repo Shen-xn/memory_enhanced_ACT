@@ -25,6 +25,8 @@ from datetime import datetime
 import cv2
 import numpy as np
 
+from data_process.exclusions import EXCLUSION_FILENAME, load_excluded_tasks
+
 
 DEFAULT_TRIGGER_PROB = 0.01
 DEFAULT_CANCEL_PROB = 0.05
@@ -72,10 +74,13 @@ def get_data_root() -> str:
 
 def list_source_tasks(data_root: str, task_filter: str | None = None) -> list[str]:
     candidates = sorted(glob.glob(os.path.join(data_root, "task_*")))
+    excluded_tasks = load_excluded_tasks(data_root)
     tasks = []
     for path in candidates:
         name = os.path.basename(path)
         if not os.path.isdir(path):
+            continue
+        if name in excluded_tasks:
             continue
         if name.startswith("task_obst_"):
             continue
@@ -83,6 +88,8 @@ def list_source_tasks(data_root: str, task_filter: str | None = None) -> list[st
             continue
         if os.path.isdir(os.path.join(path, "four_channel")):
             tasks.append(path)
+    if excluded_tasks:
+        print(f"[WARN] {EXCLUSION_FILENAME}: skipped excluded source task(s).")
     return tasks
 
 

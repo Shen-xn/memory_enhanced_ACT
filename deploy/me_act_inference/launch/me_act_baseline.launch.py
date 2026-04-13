@@ -56,8 +56,8 @@ def generate_launch_description():
                         "servo_ids": [1, 2, 3, 4, 5, 10],
                         "init_center": [500, 500, 180, 190, 500, 300],
                         "init_random_range": 40,
-                        "physical_min": [0, 0, 0, 0, 0, 100],
-                        "physical_max": [1000, 1000, 1000, 1000, 1000, 700],
+                        "physical_min": [0, 100, 50, 50, 50, 150],
+                        "physical_max": [1000, 800, 650, 900, 950, 700],
                     }
                 ],
             )

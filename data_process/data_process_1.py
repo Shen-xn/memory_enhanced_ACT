@@ -1,8 +1,8 @@
 """Prepare raw robot demonstrations for ACT training.
 
-This script mutates task folders after creating `task_copy/`. Its job is to
-keep CSV rows, RGB frames, depth frames, and normalized depth frames aligned by
-frame id before producing `states_filtered.csv`.
+This module is called by prepare_act_data.py after raw CSV cleaning. Its job is
+to keep CSV rows, RGB frames, depth frames, and normalized depth frames aligned
+by frame id before producing `states_filtered.csv`.
 """
 
 import os
@@ -273,20 +273,3 @@ def process_single_task(task_dir):
 
     print(f"[OK] 任务完成：{task_dir}")
 
-def batch_process_all_tasks():
-    """Process every task under data_process/data."""
-    task_dirs = natural_sort(glob.glob(os.path.join(SCRIPT_DIR, "./data/task_*")))
-    task_dirs = [d for d in task_dirs if os.path.isdir(d) and "task_copy" not in d]
-
-    if not task_dirs:
-        print("[WARN] 未找到 task_* 文件夹")
-        return
-
-    print(f"[INFO] 找到 {len(task_dirs)} 个任务，开始批量处理...")
-    for td in task_dirs:
-        process_single_task(td)
-
-    print("\n[OK] 全部任务处理完成！")
-
-if __name__ == "__main__":
-    batch_process_all_tasks()

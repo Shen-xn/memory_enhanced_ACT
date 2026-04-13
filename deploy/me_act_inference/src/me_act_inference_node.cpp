@@ -185,8 +185,8 @@ class MeActInferenceNode : public rclcpp::Node {
     declare_parameter<std::vector<int64_t>>("servo_ids", {1, 2, 3, 4, 5, 10});
     declare_parameter<std::vector<int64_t>>("init_center", {500, 500, 180, 190, 500, 300});
     declare_parameter<int>("init_random_range", 40);
-    declare_parameter<std::vector<int64_t>>("physical_min", {0, 0, 0, 0, 0, 100});
-    declare_parameter<std::vector<int64_t>>("physical_max", {1000, 1000, 1000, 1000, 1000, 700});
+    declare_parameter<std::vector<int64_t>>("physical_min", {0, 100, 50, 50, 50, 150});
+    declare_parameter<std::vector<int64_t>>("physical_max", {1000, 800, 650, 900, 950, 700});
   }
 
   void LoadParameters() {

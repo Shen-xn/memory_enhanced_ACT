@@ -117,7 +117,17 @@ task_xxx/
 
 推荐同时保留 `frame` 列，并让它和 `four_channel/*.png` 的数字文件名一致。训练 dataloader 会按 `frame` 和图片文件名做严格对齐，不再用“截断到较短长度”的方式凑齐数据。
 
-如果原始 CSV、`rgb/`、`depth/` 有缺帧，先运行 `data_process_1.py` 修正：CSV 缺行时删除对应图片，图片缺失时删除对应 CSV 行；再运行 `data_process_2.py` 重建 `four_channel/`。
+正式训练前推荐只运行根目录的一键入口：
+
+```powershell
+python prepare_act_data.py
+```
+
+它会按固定顺序清洗 `states.csv`、同步 `rgb/depth/states_clean.csv`、重建 `four_channel/`、把夹爪 `j10` 的动态围绕全数据集均值放大到 1.2 倍并限制在物理边界内，最后验证 `states_filtered.csv` 和 `four_channel/*.png` 严格对齐。已有的生成式 `task_obst_*` 这类 final-only 任务不会被重做，但会参与夹爪放大和最终验证。
+
+夹爪放大会先保存每个任务的 `states_filtered.pre_gripper_amp.csv`，之后反复运行脚本都会从这个备份重新生成 `states_filtered.csv`，不会叠加放大。
+
+如果某条轨迹越出固定物理边界，预处理会打印警告并写入 `data_process/data/excluded_tasks.json`。ACT dataloader、ME-block 数据集和遮挡任务生成都会读取这份清单并跳过这些任务。
 
 双图 ACT 训练时，`memory_image_four_channel` 缺失不会中断训练，dataloader 会打印警告并用全零 memory 图补齐。这用于允许部分任务没有离线 memory 图，但正式实验前建议确认警告数量。
 
@@ -140,9 +150,9 @@ task_xxx/
 ACT 训练、导出、部署统一使用固定物理范围，不再按数据集统计：
 
 ```text
-joint_min = [0, 0, 0, 0, 0, 100]
-joint_max = [1000, 1000, 1000, 1000, 1000, 700]
-joint_rng = [1000, 1000, 1000, 1000, 1000, 600]
+joint_min = [0, 100, 50, 50, 50, 150]
+joint_max = [1000, 800, 650, 900, 950, 700]
+joint_rng = [1000, 700, 600, 850, 900, 550]
 ```
 
 ## ACT 训练
@@ -268,10 +278,12 @@ ros2 launch me_act_inference me_act_memory.launch.py
 ## 正式训练前的检查清单
 
 - 这次训练出来的 ACT 必须和当前代码口径一致，旧 ACT checkpoint 不建议继续沿用
-- 先用 `data_process_1.py` 同步 `states_clean.csv`、`rgb/`、`depth/`，再用 `data_process_2.py` 生成 `four_channel/`
+- 正式训练前先运行 `python prepare_act_data.py`，不要手动跳步骤
 - `states_filtered.csv` 的 `frame` 列应和 `four_channel/*.png` 文件名一致
 - `four_channel` 统一按 OpenCV `BGRA` 口径处理
 - 关节归一化统一按固定物理范围，不再按数据集统计
+- 夹爪 `j10` 在预处理中统一按全数据集均值做 1.2 倍动态放大，并裁剪到物理范围
+- 越出物理边界的任务会进入 `excluded_tasks.json`，训练和 ME-block 相关流程会自动跳过
 - 如果双图 ACT 训练时出现 memory 图缺失警告，要确认这是有意使用全零 memory 补齐
 - baseline 导出时不要带 `--me-block-checkpoint`
 - 双图 ACT 导出时必须带 `--me-block-checkpoint`

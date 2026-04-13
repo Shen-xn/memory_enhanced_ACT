@@ -17,6 +17,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from data_process.exclusions import EXCLUSION_FILENAME, load_excluded_tasks
+
 from .me_block_config import ImportanceModelConfig, ImportanceTrainingConfig
 
 
@@ -52,18 +54,24 @@ def resolve_task_image_dir(task_dir: str, image_dirname: str = "auto") -> str:
 
 def list_task_dirs(data_root: str, image_dirname: str = "auto") -> List[str]:
     """List task folders that have a usable image directory."""
+    excluded_tasks = load_excluded_tasks(data_root)
     candidates = []
     candidates.extend(sorted(glob.glob(os.path.join(data_root, "task*"))))
     special_dir = os.path.join(data_root, "special_data")
     if os.path.isdir(special_dir):
         candidates.append(special_dir)
-    return [
+    task_dirs = [
         path
         for path in candidates
         if os.path.isdir(path)
         and "task_copy" not in path
+        and os.path.basename(os.path.normpath(path)) not in excluded_tasks
         and resolve_task_image_dir(path, image_dirname)
     ]
+    if excluded_tasks:
+        skipped = len(candidates) - len(task_dirs)
+        print(f"[WARN] {EXCLUSION_FILENAME}: skipped {skipped} excluded task(s).")
+    return task_dirs
 
 
 def list_image_files(image_dir: str) -> List[str]:
