@@ -36,8 +36,8 @@ def generate_launch_description():
                         "enable_me_block": True,
                         "validate_servo_ids": False,
                         "servo_ids": [1, 2, 3, 4, 5, 10],
-                        "init_center": [500, 560, 120, 180, 500, 240],
-                        "init_random_range": 100,
+                        "init_center": [500, 500, 180, 190, 500, 300],
+                        "init_random_range": 40,
                         "physical_min": [0, 0, 0, 0, 0, 100],
                         "physical_max": [1000, 1000, 1000, 1000, 1000, 700],
                     }

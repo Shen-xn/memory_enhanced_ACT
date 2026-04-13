@@ -176,8 +176,8 @@ class MeActInferenceNode : public rclcpp::Node {
     declare_parameter<bool>("enable_me_block", false);
     declare_parameter<bool>("validate_servo_ids", false);
     declare_parameter<std::vector<int64_t>>("servo_ids", {1, 2, 3, 4, 5, 10});
-    declare_parameter<std::vector<int64_t>>("init_center", {500, 560, 120, 180, 500, 240});
-    declare_parameter<int>("init_random_range", 100);
+    declare_parameter<std::vector<int64_t>>("init_center", {500, 500, 180, 190, 500, 300});
+    declare_parameter<int>("init_random_range", 40);
     declare_parameter<std::vector<int64_t>>("physical_min", {0, 0, 0, 0, 0, 100});
     declare_parameter<std::vector<int64_t>>("physical_max", {1000, 1000, 1000, 1000, 1000, 700});
   }
@@ -341,6 +341,17 @@ class MeActInferenceNode : public rclcpp::Node {
         return;
       }
 
+      const auto publish_frame_age = infer_finished - pending.frame.synced_stamp;
+      if (publish_frame_age > rclcpp::Duration::from_seconds(max_frame_age_ms_ / 1000.0)) {
+        RCLCPP_WARN(
+            get_logger(),
+            "Tick %llu skipped because inference output is stale: frame_age=%.1f ms, limit=%d ms",
+            static_cast<unsigned long long>(pending.tick),
+            publish_frame_age.nanoseconds() / 1e6,
+            max_frame_age_ms_);
+        return;
+      }
+
       PublishServoCommand(trajectory.front(), command_duration_ms_, servo_state.observed);
 
       RCLCPP_INFO(
@@ -348,7 +359,7 @@ class MeActInferenceNode : public rclcpp::Node {
           "tick=%llu frame=%llu frame_age=%.1fms state_wait=%.1fms infer=%.1fms qpos=[%s] observed=[%s] cmd0=[%s]",
           static_cast<unsigned long long>(pending.tick),
           static_cast<unsigned long long>(pending.frame.frame_id),
-          (infer_finished - pending.frame.synced_stamp).nanoseconds() / 1e6,
+          publish_frame_age.nanoseconds() / 1e6,
           (state_received - pending.state_query_started).nanoseconds() / 1e6,
           (infer_finished - infer_started).nanoseconds() / 1e6,
           JoinVector(servo_state.qpos).c_str(),
