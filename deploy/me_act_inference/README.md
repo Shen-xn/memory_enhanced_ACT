@@ -150,3 +150,26 @@ ros2 service call /me_act_inference_node/stop std_srvs/srv/Trigger "{}"
 ```bash
 ros2 service call /me_act_inference_node/emergency_stop std_srvs/srv/Trigger "{}"
 ```
+
+## 演示回放节点
+
+`me_act_replay_node` 用于播放本地任务数据并按 `states_filtered.csv` 逐帧下发舵机位置，方便验证数据与动作是否一致。
+
+启动示例：
+```bash
+ros2 run me_act_inference me_act_replay_node --ros-args \
+  -p task_dir:=/path/to/task_xxx \
+  -p rgb_dirname:=rgb \
+  -p depth_dirname:=depth_normalized \
+  -p states_filename:=states_filtered.csv \
+  -p publish_period_ms:=200 \
+  -p command_duration_ms:=220 \
+  -p start_on_launch:=true
+```
+
+常用参数：
+- `task_dir`: 任务目录（包含 rgb/depth_normalized/states_filtered.csv）
+- `publish_period_ms`: 回放周期
+- `command_duration_ms`: 下发到舵机的持续时长
+- `loop`: 是否循环回放
+- `start_on_launch`: 启动即开始回放

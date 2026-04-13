@@ -23,8 +23,16 @@ add_executable(me_act_inference_node
   src/me_act_inference_node.cpp
 )
 
+add_executable(me_act_replay_node
+  src/me_act_replay_node.cpp
+)
+
 target_include_directories(me_act_inference_node PRIVATE
   include
+  ${OpenCV_INCLUDE_DIRS}
+)
+
+target_include_directories(me_act_replay_node PRIVATE
   ${OpenCV_INCLUDE_DIRS}
 )
 
@@ -37,12 +45,24 @@ ament_target_dependencies(me_act_inference_node
   ros_robot_controller_msgs
 )
 
+ament_target_dependencies(me_act_replay_node
+  rclcpp
+  sensor_msgs
+  std_srvs
+  cv_bridge
+  ros_robot_controller_msgs
+)
+
 target_link_libraries(me_act_inference_node
   ${OpenCV_LIBS}
   ${TORCH_LIBRARIES}
 )
 
-install(TARGETS me_act_inference_node
+target_link_libraries(me_act_replay_node
+  ${OpenCV_LIBS}
+)
+
+install(TARGETS me_act_inference_node me_act_replay_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

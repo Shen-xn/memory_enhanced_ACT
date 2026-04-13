@@ -53,13 +53,15 @@ std::vector<std::vector<float>> ActPipeline::PredictFromFourChannel(
 
   if (config_.use_memory_image_input) {
     EnsureMemoryState();
+    prev_memory_ = prev_memory_.to(device_);
+    prev_scores_ = prev_scores_.to(device_);
     if (use_me_block && me_block_loaded_) {
       // me_block returns the rendered memory image plus updated recurrent
       // state. The state stays in this pipeline until ResetMemory() is called.
       auto outputs = me_block_module_.forward({image_tensor, prev_memory_, prev_scores_}).toTuple();
-      memory_tensor = outputs->elements()[0].toTensor();
-      prev_memory_ = outputs->elements()[1].toTensor();
-      prev_scores_ = outputs->elements()[2].toTensor();
+      memory_tensor = outputs->elements()[0].toTensor().to(device_);
+      prev_memory_ = outputs->elements()[1].toTensor().to(device_);
+      prev_scores_ = outputs->elements()[2].toTensor().to(device_);
     } else if (use_me_block) {
       throw std::runtime_error("me_block was requested, but me_block_inference.pt is not loaded.");
     } else {

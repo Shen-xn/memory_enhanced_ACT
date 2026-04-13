@@ -109,3 +109,7 @@ deploy/me_act_inference/
 - baseline 和 memory 版不要混用目录
 - 如果打开了 `enable_me_block`，导出目录里必须真的有 `me_block_inference.pt`
 - ROS2 节点的 `initialize/stop/emergency_stop` 会重置在线 memory state；节点内部已经对推理和重置加锁，避免服务回调和控制 tick 并发改同一份 memory
+ 
+## 数据回放校验
+
+`deploy/me_act_inference` 里新增 `me_act_replay_node`，可从任务目录回放 `rgb/depth_normalized` 并按 `states_filtered.csv` 下发舵机位置，用于验证数据是否正确。
