@@ -30,7 +30,7 @@ def generate_launch_description():
             ),
             Node(
                 package="me_act_inference_py",
-                executable="me_act_inference_node_py.py",
+                executable="me_act_inference_node_py",
                 name="me_act_inference_node_py",
                 output="screen",
                 parameters=[
