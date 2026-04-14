@@ -26,6 +26,69 @@ POLY_ORDER = 2
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def summarize_frame_ids(frame_ids, limit=8):
+    """Compactly format a frame-id list for logs."""
+    ids = list(frame_ids)
+    if not ids:
+        return "[]"
+    if len(ids) <= limit:
+        return str(ids)
+    head = ", ".join(str(x) for x in ids[: limit // 2])
+    tail = ", ".join(str(x) for x in ids[-(limit // 2) :])
+    return f"[{head}, ..., {tail}] (total={len(ids)})"
+
+
+def summarize_removed_runs(removed_ids, total_frames):
+    """Describe contiguous removal blocks for high-level task logs."""
+    ids = sorted(int(x) for x in removed_ids)
+    if not ids:
+        return {
+            "count": 0,
+            "ratio": 0.0,
+            "runs": 0,
+            "largest_run": 0,
+            "largest_start": None,
+            "largest_end": None,
+            "largest_zone": "none",
+        }
+
+    runs = []
+    start = prev = ids[0]
+    for frame_id in ids[1:]:
+        if frame_id == prev + 1:
+            prev = frame_id
+        else:
+            runs.append((start, prev, prev - start + 1))
+            start = prev = frame_id
+    runs.append((start, prev, prev - start + 1))
+
+    largest = max(runs, key=lambda x: x[2])
+    center = ((largest[0] + largest[1]) / 2) / max(total_frames, 1)
+    if center < 0.2:
+        zone = "head"
+    elif center < 0.8:
+        zone = "mid"
+    else:
+        zone = "tail"
+
+    return {
+        "count": len(ids),
+        "ratio": len(ids) / max(total_frames, 1),
+        "runs": len(runs),
+        "largest_run": largest[2],
+        "largest_start": largest[0],
+        "largest_end": largest[1],
+        "largest_zone": zone,
+    }
+
+
+def count_files(img_dir, ext):
+    """Count files for one image directory."""
+    if not os.path.exists(img_dir):
+        return 0
+    return len(glob.glob(os.path.join(img_dir, f"*{ext}")))
+
+
 def natural_sort(lst):
     """Sort filenames by embedded numbers instead of lexicographic order."""
     convert = lambda text: int(text) if text.isdigit() else text.lower()
@@ -113,20 +176,26 @@ def sync_raw_images_with_csv(task_dir):
         print("[WARN] CSV/RGB/Depth have no shared frames")
         return False
 
-    extra_image_frames = (rgb_frames | depth_frames) - common_frames
-    dropped_csv_frames = csv_frames - common_frames
+    extra_image_frames = sorted((rgb_frames | depth_frames) - common_frames)
+    dropped_csv_frames = sorted(csv_frames - common_frames)
     changed = False
+
+    print(
+        "[ALIGN] "
+        f"csv={len(csv_frames)} rgb={len(rgb_frames)} depth={len(depth_frames)} "
+        f"shared={len(common_frames)}"
+    )
 
     if extra_image_frames:
         delete_unused_images(task_dir, common_frames, delete_mode=False)
         changed = True
-        print(f"[FIX] Removed extra image frames: {sorted(extra_image_frames)[:20]}")
+        print(f"[FIX] Removed extra image frames: {summarize_frame_ids(extra_image_frames)}")
 
     if dropped_csv_frames:
         csv_df = csv_df[csv_df["frame"].isin(common_frames)].reset_index(drop=True)
         csv_df.to_csv(csv_path, index=False)
         changed = True
-        print(f"[FIX] Removed CSV rows without matching images: {sorted(dropped_csv_frames)[:20]}")
+        print(f"[FIX] Removed CSV rows without matching images: {summarize_frame_ids(dropped_csv_frames)}")
 
     if changed:
         rgb_num = len(index_frame_files(rgb_dir, "*.jpg"))
@@ -152,11 +221,14 @@ def clean_bad_rows_in_trajectory(df, task_dir):
     if not bad_indices:
         return df
 
-    print(f"[WARN] Found {len(bad_indices)} bad trajectory rows: {bad_indices[:20]}")
+    print(
+        f"[WARN] Found {len(bad_indices)} bad trajectory rows: "
+        f"{summarize_frame_ids(df.loc[bad_mask, 'frame'].tolist())}"
+    )
     df_clean = df[~bad_mask].reset_index(drop=True)
     deleted_frames = df.loc[bad_mask, "frame"].tolist()
     delete_unused_images(task_dir, deleted_frames, delete_mode=True)
-    print(f"[OK] Deleted images for bad frames: {deleted_frames[:20]}")
+    print(f"[OK] Deleted images for bad frames: {summarize_frame_ids(deleted_frames)}")
     return df_clean
 
 
@@ -191,8 +263,18 @@ def filter_trajectory(df):
 
     filtered_df = df[keep_mask].reset_index(drop=True)
     filtered_df["original_frame"] = df.loc[keep_mask, "frame"].values
-    deleted = len(df) - len(filtered_df)
-    print(f"[INFO] Trajectory filtered: kept={len(filtered_df)} removed={deleted}")
+    removed_ids = df.loc[~pd.Series(keep_mask, index=df.index), "frame"].tolist()
+    stats = summarize_removed_runs(removed_ids, len(df))
+    print(
+        "[FILTER] "
+        f"kept={len(filtered_df)} removed={stats['count']} "
+        f"ratio={stats['ratio']:.2%} runs={stats['runs']} "
+        f"largest_run={stats['largest_run']} "
+        f"largest_span={stats['largest_start']}->{stats['largest_end']} "
+        f"zone={stats['largest_zone']}"
+    )
+    if removed_ids:
+        print(f"[FILTER] removed original frames: {summarize_frame_ids(removed_ids)}")
     return filtered_df
 
 
@@ -250,7 +332,16 @@ def process_single_task(task_dir):
 
     csv_path = os.path.join(task_dir, "states_clean.csv")
     df = pd.read_csv(csv_path)
+    raw_rows = len(df)
+    print(f"[TASK] {os.path.basename(task_dir)} raw rows after CSV clean/alignment: {raw_rows}")
     df = clean_bad_rows_in_trajectory(df, task_dir)
+    after_bad_rows = len(df)
+    if raw_rows != after_bad_rows:
+        print(
+            "[TASK] "
+            f"after bad-row cleanup: kept={after_bad_rows} removed={raw_rows - after_bad_rows} "
+            f"ratio={(raw_rows - after_bad_rows) / max(raw_rows, 1):.2%}"
+        )
     df = smooth_trajectory(df)
     df_filtered = filter_trajectory(df)
 
@@ -264,6 +355,18 @@ def process_single_task(task_dir):
     df_filtered.to_csv(out_csv, index=False)
     if os.path.exists(csv_path):
         os.remove(csv_path)
+
+    rgb_count = count_files(os.path.join(task_dir, "rgb"), ".jpg")
+    depth_count = count_files(os.path.join(task_dir, "depth"), ".png")
+    depth_norm_count = count_files(os.path.join(task_dir, "depth_normalized"), ".png")
+    print(
+        "[TASK] final counts "
+        f"csv={len(df_filtered)} rgb={rgb_count} depth={depth_count} depth_norm={depth_norm_count}"
+    )
+    print(
+        "[TASK] overall retention "
+        f"kept={len(df_filtered)}/{raw_rows} ratio={len(df_filtered) / max(raw_rows, 1):.2%}"
+    )
 
     print(f"[OK] Task complete: {task_dir}")
 

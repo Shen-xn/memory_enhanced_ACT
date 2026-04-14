@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -99,6 +100,17 @@ def frame_number_from_path(path: Path) -> int:
     if not matches:
         raise ValueError(f"Filename has no frame number: {path}")
     return int(matches[0])
+
+
+def print_step_banner(step_no: int, total_steps: int, title: str) -> float:
+    start = time.time()
+    print(f"\n[STEP {step_no}/{total_steps}] {title}")
+    return start
+
+
+def print_step_done(step_start: float, summary: str) -> None:
+    elapsed = time.time() - step_start
+    print(f"[STEP DONE] {summary} elapsed={elapsed:.1f}s")
 
 
 def discover_tasks(data_root: Path) -> list[Path]:
@@ -425,22 +437,27 @@ def run_prepare(args: argparse.Namespace) -> int:
                 f"{len(final_only_tasks)}"
             )
 
-        print("\n[STEP 1/5] Clean states.csv -> states_clean.csv")
+        step_start = print_step_banner(1, 5, "Clean states.csv -> states_clean.csv")
         total_incomplete = 0
+        clean_rows = 0
         for task_dir in raw_tasks:
-            _, incomplete = clean_states_csv(task_dir, strict=args.strict_csv)
+            rows, incomplete = clean_states_csv(task_dir, strict=args.strict_csv)
+            clean_rows += rows
             total_incomplete += incomplete
         print(f"[CSV] total incomplete raw rows={total_incomplete}")
+        print_step_done(step_start, f"cleaned {len(raw_tasks)} raw task(s), rows={clean_rows}, incomplete_rows={total_incomplete}")
 
-        print("\n[STEP 2/5] Sync/filter trajectories and raw images")
+        step_start = print_step_banner(2, 5, "Sync/filter trajectories and raw images")
         for task_dir in raw_tasks:
             data_process_1.process_single_task(str(task_dir))
+        print_step_done(step_start, f"processed {len(raw_tasks)} raw task(s)")
 
-        print("\n[STEP 3/5] Rebuild four_channel images")
+        step_start = print_step_banner(3, 5, "Rebuild four_channel images")
         for task_dir in raw_tasks:
             data_process_2.process_single_task(str(task_dir))
+        print_step_done(step_start, f"rebuilt four_channel for {len(raw_tasks)} raw task(s)")
 
-        print("\n[STEP 4/5] Amplify gripper trajectory")
+        step_start = print_step_banner(4, 5, "Amplify gripper trajectory")
         gripper_results = amplify_gripper_trajectories(
             tasks,
             scale=GRIPPER_SCALE,
@@ -462,8 +479,9 @@ def run_prepare(args: argparse.Namespace) -> int:
         if failed_gripper:
             print("[FAIL] Gripper amplification failed. Fix data before training.")
             return 1
+        print_step_done(step_start, f"updated {ok_gripper}/{len(gripper_results)} task(s)")
 
-    print("\n[STEP 5/5] Validate final ACT training data")
+    step_start = print_step_banner(5, 5, "Validate final ACT training data")
     results = [validate_task(task_dir, future_steps=args.future_steps, sample_images=not args.fast_validate) for task_dir in tasks]
 
     excluded = {
@@ -482,6 +500,13 @@ def run_prepare(args: argparse.Namespace) -> int:
     excluded_count = len(excluded)
     warn_count = sum(len(result.warnings) for result in results)
     print(f"[VALIDATE] ok={ok_count}/{len(results)} excluded={excluded_count} warnings={warn_count}")
+    warned_tasks = [result for result in results if result.warnings]
+    failed = [result for result in results if result.errors]
+    print(
+        "[VALIDATE] summary "
+        f"warned_tasks={len(warned_tasks)} failed_tasks={len(failed)} "
+        f"future_steps={args.future_steps} sample_images={not args.fast_validate}"
+    )
 
     for result in results:
         for warning in result.warnings:
@@ -489,11 +514,12 @@ def run_prepare(args: argparse.Namespace) -> int:
         for error in result.errors:
             print(f"[ERROR] {result.task_name}: {error}")
 
-    failed = [result for result in results if result.errors]
     if failed:
+        print_step_done(step_start, f"validation failed for {len(failed)} task(s)")
         print(f"[FAIL] {len(failed)} task(s) failed validation. Fix data before training.")
         return 1
 
+    print_step_done(step_start, f"validated {len(results)} task(s)")
     if excluded:
         print("[OK] Dataset is ready for ACT training; excluded tasks will be ignored by dataloaders.")
     else:
