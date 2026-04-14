@@ -1,24 +1,17 @@
-from setuptools import setup
-
+from setuptools import setup, find_packages
+from glob import glob
 
 package_name = "me_act_inference_py"
-
 
 setup(
     name=package_name,
     version="0.0.1",
-    py_modules=[
-        "act_pipeline_py",
-        "me_act_inference_node_py",
-    ],
-    package_dir={"": "scripts"},
+    packages=find_packages(),  # 自动发现包
+    # 不要 package_dir 配置
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml"]),
-        (f"share/{package_name}/launch", [
-            "launch/me_act_baseline_py.launch.py",
-            "launch/me_act_memory_py.launch.py",
-        ]),
+        (f"share/{package_name}/launch", glob("launch/*.launch.py")),
         (f"share/{package_name}", ["README.md"]),
     ],
     install_requires=["setuptools"],
@@ -29,7 +22,7 @@ setup(
     license="MIT",
     entry_points={
         "console_scripts": [
-            "me_act_inference_node_py = me_act_inference_node_py:main",
+            "me_act_inference_node_py = me_act_inference_py.me_act_inference_node_py:main",
         ],
     },
 )

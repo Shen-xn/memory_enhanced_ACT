@@ -23,7 +23,6 @@ DEPTH_CLIP_MIN = 0
 DEPTH_CLIP_MAX = 800
 WINDOW_SIZE = 5
 POLY_ORDER = 2
-MAX_FRAME_GAP = 5
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -171,7 +170,7 @@ def smooth_trajectory(df):
 
 
 def filter_trajectory(df):
-    """Drop near-static frames while preserving occasional samples across pauses."""
+    """Drop near-static frames and keep only motion-above-threshold samples."""
     if len(df) <= 1:
         return df
 
@@ -184,7 +183,7 @@ def filter_trajectory(df):
         prev = data[flag]
         curr = data[i]
         dist = math.sqrt(np.sum((curr - prev) ** 2))
-        if dist >= DISTANCE_THRESHOLD or (i - flag) >= MAX_FRAME_GAP:
+        if dist >= DISTANCE_THRESHOLD:
             keep_mask.append(True)
             flag = i
         else:
