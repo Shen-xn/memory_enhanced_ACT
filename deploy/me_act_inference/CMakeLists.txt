@@ -66,6 +66,16 @@ install(TARGETS me_act_inference_node me_act_replay_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  scripts/me_act_inference_node_py.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(FILES
+  scripts/act_pipeline_py.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )

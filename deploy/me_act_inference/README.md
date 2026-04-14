@@ -24,6 +24,12 @@ rgb + depth + servo_state(service) -> preprocess(BGRA) -> ACT -> action_seq[0] -
 ros2 launch me_act_inference me_act_baseline.launch.py
 ```
 
+纯 Python 版本：
+
+```bash
+ros2 launch me_act_inference me_act_baseline_py.launch.py
+```
+
 ### ACT + online me_block
 
 ```text
@@ -34,6 +40,12 @@ rgb + depth + servo_state(service) -> preprocess(BGRA) -> me_block -> memory_ima
 
 ```bash
 ros2 launch me_act_inference me_act_memory.launch.py
+```
+
+纯 Python 版本：
+
+```bash
+ros2 launch me_act_inference me_act_memory_py.launch.py
 ```
 
 ## GPU
