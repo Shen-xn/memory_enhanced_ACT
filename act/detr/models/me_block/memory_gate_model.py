@@ -10,15 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from typing import Dict, Optional
-import warnings
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import (
-    ResNet18_Weights,
-    resnet18,
-)
 
 from .me_block_config import ImportanceModelConfig, MEBlockConfig, MemoryUpdateConfig, default_me_block_config
 
@@ -42,87 +37,6 @@ def select_segmentation_input(images: torch.Tensor, config: ImportanceModelConfi
             f"Expected at least {expected_channels} channels for segmentation input, got {images.shape[1]}."
         )
     return images[:, :expected_channels]
-
-
-def _adapt_conv_to_input_channels(old_conv: nn.Conv2d, input_channels: int) -> nn.Conv2d:
-    """Reuse pretrained conv weights when the requested input channel count differs."""
-    if old_conv.in_channels == input_channels:
-        return old_conv
-
-    new_conv = nn.Conv2d(
-        input_channels,
-        old_conv.out_channels,
-        kernel_size=old_conv.kernel_size,
-        stride=old_conv.stride,
-        padding=old_conv.padding,
-        dilation=old_conv.dilation,
-        groups=old_conv.groups,
-        bias=old_conv.bias is not None,
-    )
-
-    with torch.no_grad():
-        if input_channels <= old_conv.in_channels:
-            new_conv.weight.copy_(old_conv.weight[:, :input_channels])
-        else:
-            new_conv.weight[:, : old_conv.in_channels].copy_(old_conv.weight)
-            mean_weight = old_conv.weight.mean(dim=1, keepdim=True)
-            for channel_idx in range(old_conv.in_channels, input_channels):
-                new_conv.weight[:, channel_idx : channel_idx + 1].copy_(mean_weight)
-        if old_conv.bias is not None and new_conv.bias is not None:
-            new_conv.bias.copy_(old_conv.bias)
-
-    return new_conv
-
-
-def _resolve_weights(weight_enum, pretrained_backbone: bool, name: str):
-    if not pretrained_backbone:
-        return None
-    try:
-        return weight_enum.DEFAULT
-    except Exception as exc:
-        warnings.warn(f"Failed to resolve {name} pretrained weights: {exc}. Falling back to random init.")
-        return None
-
-
-def _load_backbone(builder, weights, name: str):
-    try:
-        return builder(weights=weights)
-    except Exception as exc:
-        if weights is None:
-            raise
-        warnings.warn(f"Failed to load {name} pretrained weights: {exc}. Falling back to random init.")
-        return builder(weights=None)
-
-
-class TruncatedResNet18Layer2Segmentation(nn.Module):
-    """Small fully-convolutional segmentation head built from early ResNet18 layers."""
-
-    def __init__(self, config: ImportanceModelConfig):
-        super().__init__()
-        weights = _resolve_weights(ResNet18_Weights, config.pretrained_backbone, "ResNet18")
-        backbone = _load_backbone(resnet18, weights, "ResNet18")
-
-        backbone.conv1 = _adapt_conv_to_input_channels(
-            backbone.conv1,
-            config.segmentation_input_channels,
-        )
-        self.stem = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool)
-        self.layer1 = backbone.layer1
-        self.layer2 = backbone.layer2
-        self.head = nn.Sequential(
-            nn.Conv2d(128, 64, kernel_size=1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, config.num_output_classes, kernel_size=1),
-        )
-
-    def forward(self, images: torch.Tensor, config: ImportanceModelConfig) -> torch.Tensor:
-        normalized = normalize_image_channels(images, config)
-        features = self.stem(normalized)
-        features = self.layer1(features)
-        features = self.layer2(features)
-        logits = self.head(features)
-        return F.interpolate(logits, size=images.shape[-2:], mode="bilinear", align_corners=False)
 
 
 class ConvBNAct(nn.Module):
@@ -216,15 +130,11 @@ class ImportanceSegmentationModel(nn.Module):
     def __init__(self, config: ImportanceModelConfig):
         super().__init__()
         self.config = config
-        if config.model_name == "truncated_resnet18_layer2":
-            self.model = TruncatedResNet18Layer2Segmentation(config)
-        elif config.model_name == "compact_fpn_v1":
-            self.model = CompactFPNV1Segmentation(config)
-        else:
+        if config.model_name != "compact_fpn_v1":
             raise ValueError(
-                f"Unsupported importance model: {config.model_name}. "
-                "Supported models: truncated_resnet18_layer2, compact_fpn_v1."
+                f"Unsupported importance model: {config.model_name}. Supported model: compact_fpn_v1."
             )
+        self.model = CompactFPNV1Segmentation(config)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         segmentation_images = select_segmentation_input(images, self.config)

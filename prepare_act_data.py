@@ -247,7 +247,7 @@ def validate_task(task_dir: Path, future_steps: int, sample_images: bool = True)
 
     rgb_frames = validate_frame_files(result, task_dir, "rgb", ".jpg", required=False)
     depth_frames = validate_frame_files(result, task_dir, "depth", ".png", required=False)
-    depth_norm_frames = validate_frame_files(result, task_dir, "depth_normalized", ".jpg", required=False)
+    depth_norm_frames = validate_frame_files(result, task_dir, "depth_normalized", ".png", required=False)
     if rgb_frames and rgb_frames != csv_frames:
         result.warn("rgb frames do not match states_filtered frame column")
     if depth_frames and depth_frames != csv_frames:

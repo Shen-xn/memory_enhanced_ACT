@@ -82,7 +82,7 @@ class ServoStateSnapshot:
 
 class MeActInferenceNodePy(Node):
     def __init__(self) -> None:
-        super().__init__("me_act_inference_node")
+        super().__init__("me_act_inference_node_py")
         self.bridge = CvBridge()
         self._rng = random.Random()
         self._frame_counter = 0
@@ -155,7 +155,7 @@ class MeActInferenceNodePy(Node):
             raise RuntimeError("enable_me_block=true, but deploy_dir does not contain me_block_inference.pt.")
 
         self.get_logger().info(
-            "me_act_inference_node ready. state=%s deploy_dir=%s enable_me_block=%s"
+            "me_act_inference_node_py ready. state=%s deploy_dir=%s enable_me_block=%s"
             % (
                 self._state.value,
                 self.deploy_dir,

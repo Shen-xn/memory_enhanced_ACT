@@ -27,7 +27,7 @@ ros2 launch me_act_inference me_act_baseline.launch.py
 纯 Python 版本：
 
 ```bash
-ros2 launch me_act_inference me_act_baseline_py.launch.py
+ros2 launch me_act_inference_py me_act_baseline_py.launch.py
 ```
 
 ### ACT + online me_block
@@ -45,7 +45,7 @@ ros2 launch me_act_inference me_act_memory.launch.py
 纯 Python 版本：
 
 ```bash
-ros2 launch me_act_inference me_act_memory_py.launch.py
+ros2 launch me_act_inference_py me_act_memory_py.launch.py
 ```
 
 ## GPU

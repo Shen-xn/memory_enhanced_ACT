@@ -13,8 +13,6 @@ DEFAULT_CLASS_NAMES = ["target", "goal", "arm"]
 class ImportanceModelConfig:
     """Architecture and normalization settings saved inside me_block checkpoints."""
 
-    # Changes in this block affect the segmentation model itself.
-    # If you change them, train a new checkpoint.
     model_name: str = "compact_fpn_v1"
     input_channels: int = 4
     segmentation_input_channels: int = 3
@@ -23,7 +21,6 @@ class ImportanceModelConfig:
     class_names: List[str] = field(default_factory=lambda: list(DEFAULT_CLASS_NAMES))
     image_mean: List[float] = field(default_factory=lambda: [0.5, 0.5, 0.5, 0.5])
     image_std: List[float] = field(default_factory=lambda: [0.5, 0.5, 0.5, 0.5])
-    pretrained_backbone: bool = False
 
     @property
     def num_foreground_classes(self) -> int:
@@ -122,17 +119,7 @@ def _filter_dataclass_payload(cls, payload: Dict | None) -> Dict:
 
 
 def importance_model_config_from_dict(payload: Dict | None) -> ImportanceModelConfig:
-    data = _filter_dataclass_payload(ImportanceModelConfig, payload)
-    # Older checkpoints were trained before `model_name` was saved. Treat those
-    # configs as the original ResNet18-layer2 model instead of inheriting today's
-    # default architecture.
-    if payload is not None and "model_name" not in payload:
-        data.setdefault("model_name", "truncated_resnet18_layer2")
-        data.setdefault("segmentation_input_channels", 3)
-        data.setdefault("image_mean", [0.485, 0.456, 0.406, 0.5])
-        data.setdefault("image_std", [0.229, 0.224, 0.225, 0.5])
-        data.setdefault("pretrained_backbone", True)
-    return ImportanceModelConfig(**data)
+    return ImportanceModelConfig(**_filter_dataclass_payload(ImportanceModelConfig, payload))
 
 
 def memory_update_config_from_dict(payload: Dict | None) -> MemoryUpdateConfig:
@@ -149,6 +136,16 @@ def generation_config_from_dict(payload: Dict | None) -> MemoryGenerationConfig:
     return MemoryGenerationConfig(**_filter_dataclass_payload(MemoryGenerationConfig, payload))
 
 
+def me_block_config_from_dict(payload: Dict | None) -> MEBlockConfig:
+    payload = dict(payload or {})
+    return MEBlockConfig(
+        importance=importance_model_config_from_dict(payload.get("importance", {})),
+        memory=memory_update_config_from_dict(payload.get("memory", {})),
+        training=training_config_from_dict(payload.get("training", {})),
+        generation=generation_config_from_dict(payload.get("generation", {})),
+    )
+
+
 def save_config(config: MEBlockConfig, path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -158,9 +155,4 @@ def save_config(config: MEBlockConfig, path: str) -> None:
 def load_config(path: str) -> MEBlockConfig:
     with open(path, "r", encoding="utf-8") as f:
         payload = json.load(f)
-    return MEBlockConfig(
-        importance=importance_model_config_from_dict(payload.get("importance", {})),
-        memory=memory_update_config_from_dict(payload.get("memory", {})),
-        training=training_config_from_dict(payload.get("training", {})),
-        generation=generation_config_from_dict(payload.get("generation", {})),
-    )
+    return me_block_config_from_dict(payload)

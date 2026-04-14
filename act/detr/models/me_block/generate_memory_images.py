@@ -20,12 +20,8 @@ import torch
 from tqdm import tqdm
 
 from .me_block_config import (
-    MEBlockConfig,
     MemoryGenerationConfig,
-    generation_config_from_dict,
-    importance_model_config_from_dict,
-    memory_update_config_from_dict,
-    training_config_from_dict,
+    me_block_config_from_dict,
 )
 from .importance_dataset import list_task_dirs, read_four_channel
 from .memory_gate_model import ImportanceMemoryModel
@@ -64,16 +60,7 @@ def apply_memory_overrides(model: ImportanceMemoryModel, args: argparse.Namespac
 def load_model_from_checkpoint(path: str, device: torch.device) -> ImportanceMemoryModel:
     """Restore model weights and config from a me_block checkpoint."""
     checkpoint = torch.load(path, map_location=device, weights_only=False)
-    config_payload = checkpoint["config"]
-    config = MEBlockConfig(
-        importance=importance_model_config_from_dict(config_payload.get("importance", {})),
-        memory=memory_update_config_from_dict(config_payload["memory"]),
-        training=training_config_from_dict(config_payload.get("training", {})),
-        generation=generation_config_from_dict(config_payload.get("generation", {})),
-    )
-    # Checkpoint loading immediately restores learned weights, so pretrained
-    # initialization only adds an unnecessary cache/network dependency.
-    config.importance.pretrained_backbone = False
+    config = me_block_config_from_dict(checkpoint["config"])
 
     model = ImportanceMemoryModel(config=config).to(device)
     model_state = checkpoint["model_state_dict"]

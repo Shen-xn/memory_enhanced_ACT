@@ -219,6 +219,10 @@ def validate(model, val_loader, config, logger, epoch, is_obst=False):
     append_metrics_record(config.EXP_LOG_DIR, stage, epoch, val_metrics)
     return val_metrics
 
+
+def nan_metrics_like(metrics):
+    return {key: float("nan") for key in metrics.keys()}
+
 def main():
     """Run a fresh or resumed ACT experiment."""
     resume_ckpt = prepare_run_config(cfg)
@@ -271,6 +275,9 @@ def main():
     
     # 5. 开始训练
     logger.info("===== 开始训练 =====")
+    val_has_obstacle = bool(getattr(val_loader.dataset, "split_has_obstacle_samples", False))
+    if not val_has_obstacle:
+        logger.info("===== validation split has no obstacle samples; val_obst will be skipped =====")
     for epoch in range(start_epoch, cfg.NUM_EPOCHS + 1):
         is_best = False
         val_metrics = None
@@ -288,12 +295,15 @@ def main():
             # 普通轨迹验证
             val_metrics = validate(model, val_loader, cfg, logger, epoch, is_obst=False)
             # 障碍轨迹验证
-            val_obst_metrics = validate(model, val_loader, cfg, logger, epoch, is_obst=True)
+            if val_has_obstacle:
+                val_obst_metrics = validate(model, val_loader, cfg, logger, epoch, is_obst=True)
+            else:
+                val_obst_metrics = nan_metrics_like(val_metrics)
             
             # 记录验证指标
             for k in val_metrics_history.keys():
                 val_metrics_history[k].append(val_metrics.get(k, 0.0))
-                val_obst_metrics_history[k].append(val_obst_metrics.get(k, 0.0))
+                val_obst_metrics_history[k].append(val_obst_metrics.get(k, float("nan")))
             
             # 保存可视化
             if cfg.SAVE_PLOT:

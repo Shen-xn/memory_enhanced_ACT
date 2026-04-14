@@ -11,6 +11,7 @@ import argparse
 import json
 import math
 import os
+from contextlib import nullcontext
 from datetime import datetime
 
 import numpy as np
@@ -152,8 +153,10 @@ def run_epoch(
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        logits = model.segmenter(images)
-        loss = criterion(logits, labels)
+        grad_context = nullcontext() if is_train else torch.no_grad()
+        with grad_context:
+            logits = model.segmenter(images)
+            loss = criterion(logits, labels)
 
         if is_train:
             optimizer.zero_grad()

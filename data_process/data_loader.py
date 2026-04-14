@@ -148,6 +148,15 @@ def _source_group_key(task_path):
     return task_name
 
 
+def _split_group_keys(group_keys, train_ratio, label):
+    if len(group_keys) <= 1:
+        raise ValueError(f"Need at least 2 {label} source groups to split train/val, but got {len(group_keys)}.")
+
+    split_idx = int(len(group_keys) * train_ratio)
+    split_idx = max(1, min(len(group_keys) - 1, split_idx))
+    return set(group_keys[:split_idx]), set(group_keys[split_idx:])
+
+
 def _format_joint_range_errors(samples, joint_min, joint_max, limit=8):
     """Build a compact error message for samples outside fixed joint limits."""
     bad = []
@@ -202,7 +211,7 @@ class ImitationDataset(Dataset):
         self.seed = seed
         
         self.all_samples = self._load_all_samples()
-        self._split_by_task(train_ratio, seed)
+        self._split_by_task_strict(train_ratio, seed)
 
         if normalize_joints and self.joint_min_max is None:
             self.joint_min_max = get_fixed_joint_stats()
@@ -452,6 +461,77 @@ class ImitationDataset(Dataset):
             raise ValueError(f"{self.mode.upper()} split 为空，请检查任务数量、train_ratio 和障碍/普通轨迹分布。")
 
         print(f"{self.mode.upper()} 集样本数：{len(self.samples)}")
+
+    def _split_by_task_strict(self, train_ratio, seed):
+        """Split normal/obstacle source groups separately."""
+        task_to_obst = {}
+        task_to_group = {}
+        for sample in self.all_samples:
+            task_to_obst[sample["task"]] = bool(sample["obst"])
+            task_to_group[sample["task"]] = _source_group_key(sample["task"])
+
+        grouped_tasks = {}
+        for task, group in task_to_group.items():
+            grouped_tasks.setdefault(group, set()).add(task)
+
+        normal_group_keys = sorted(
+            group for group, tasks in grouped_tasks.items()
+            if any(not task_to_obst[task] for task in tasks)
+        )
+        obstacle_group_keys = sorted(
+            group for group, tasks in grouped_tasks.items()
+            if any(task_to_obst[task] for task in tasks)
+        )
+
+        rng = random.Random(seed)
+        rng.shuffle(normal_group_keys)
+        train_groups, val_groups = _split_group_keys(normal_group_keys, train_ratio, "normal")
+
+        rng.shuffle(obstacle_group_keys)
+        if obstacle_group_keys:
+            obstacle_train_groups, obstacle_val_groups = _split_group_keys(
+                obstacle_group_keys,
+                train_ratio,
+                "obstacle",
+            )
+            train_groups |= obstacle_train_groups
+            val_groups |= obstacle_val_groups
+
+        train_tasks = {task for group in train_groups for task in grouped_tasks[group]}
+        val_tasks = {task for group in val_groups for task in grouped_tasks[group]}
+
+        if self.mode == "train":
+            self.samples = [s for s in self.all_samples if s["task"] in train_tasks]
+        else:
+            self.samples = [s for s in self.all_samples if s["task"] in val_tasks]
+
+        self.samples = self._balance_obstacle_ratio(
+            self.samples,
+            seed + (0 if self.mode == "train" else 1000),
+        )
+        self.samples = self._interleave_samples(self.samples, seed + (0 if self.mode == "train" else 1000))
+
+        train_task_count = len(train_tasks)
+        val_task_count = len(val_tasks)
+        train_obst_count = sum(1 for task in train_tasks if task_to_obst[task])
+        val_obst_count = sum(1 for task in val_tasks if task_to_obst[task])
+        sample_obst_count = sum(1 for sample in self.samples if sample["obst"])
+        self.has_obstacle_groups = bool(obstacle_group_keys)
+        self.split_has_obstacle_samples = sample_obst_count > 0
+
+        print(
+            f"Task split | train={train_task_count} (obst={train_obst_count}, normal={train_task_count - train_obst_count}) "
+            f"| val={val_task_count} (obst={val_obst_count}, normal={val_task_count - val_obst_count})"
+        )
+        print(
+            f"Source groups | train={len(train_groups)} | val={len(val_groups)} | "
+            f"{self.mode} samples obst={sample_obst_count}, normal={len(self.samples) - sample_obst_count}"
+        )
+
+        if not self.samples:
+            raise ValueError(f"{self.mode.upper()} split is empty. Check task count, train_ratio, and obstacle distribution.")
+
+        print(f"{self.mode.upper()} samples: {len(self.samples)}")
 
     def _normalize_joints(self):
         """Normalize qpos/actions with fixed robot limits, not dataset statistics."""

@@ -196,34 +196,7 @@ def augment_sample(
 
 
 class ImportanceFrameDataset(Dataset):
-    """Frame-level dataset for importance segmentation.
-
-    The split is task-based rather than frame-based, so validation remains a
-    genuine held-out trajectory set. `special_data` is treated as auxiliary
-    train-only data.
-    """
-
-    def __init__(
-        self,
-        config: ImportanceTrainingConfig,
-        model_config: ImportanceModelConfig,
-        split: str,
-    ):
-        if split not in {"train", "val"}:
-            raise ValueError(f"Unsupported split: {split}")
-
-        self.config = config
-        self.model_config = model_config
-        self.split = split
-        self.samples = self._load_samples()
-
-class ImportanceFrameDataset(Dataset):
-    """Frame-level dataset for importance segmentation.
-
-    The split is task-based rather than frame-based, so validation remains a
-    genuine held-out trajectory set. `special_data` is treated as auxiliary
-    train-only data.
-    """
+    """Frame-level dataset for importance segmentation."""
 
     def __init__(
         self,
@@ -240,7 +213,7 @@ class ImportanceFrameDataset(Dataset):
         self.samples = self._load_samples()
 
     def _load_samples(self) -> List[Dict]:
-        """Collect image/label pairs and apply RANDOM IMAGE-level train/val split."""
+        """Collect image/label pairs and apply random image-level train/val split."""
         task_dirs = list_task_dirs(self.config.data_root, image_dirname=self.config.image_dirname)
         if not task_dirs:
             raise FileNotFoundError(f"No task folders found under {self.config.data_root}")
@@ -279,14 +252,11 @@ class ImportanceFrameDataset(Dataset):
         if not all_samples:
             raise FileNotFoundError("No valid labeled samples found in task* folders.")
 
-        # 全局打乱所有图片
         rng = random.Random(self.config.seed)
         rng.shuffle(all_samples)
 
         total_images = len(all_samples)
         split_index = int(total_images * self.config.train_ratio)
-
-        # 强制至少各一张
         split_index = max(1, split_index)
         split_index = min(total_images - 1, split_index)
 
@@ -302,36 +272,6 @@ class ImportanceFrameDataset(Dataset):
             raise ValueError(f"{self.split} split has no samples!")
 
         return final_samples
-
-    def __len__(self) -> int:
-        return len(self.samples)  # 这行必须在！刚才就是缺了它
-
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        sample = self.samples[index]
-        image = read_model_input(
-            sample["image_path"],
-            sample["image_dirname"],
-            self.model_config.input_channels,
-        ).astype(np.float32) / 255.0
-        label = read_label(sample["label_path"])
-        if self.split == "train":
-            image, label = augment_sample(
-                image,
-                label,
-                self.config,
-                self.model_config.unlabeled_index,
-            )
-
-        allowed_values = {self.model_config.background_index, self.model_config.unlabeled_index}
-        allowed_values.update(range(1, self.model_config.num_foreground_classes + 1))
-        unique_values = set(int(v) for v in np.unique(label))
-        invalid_values = sorted(unique_values - allowed_values)
-        if invalid_values:
-            raise ValueError(f"Unexpected label values {invalid_values} in {sample['label_path']}.")
-
-        image_tensor = torch.from_numpy(np.transpose(image, (2, 0, 1))).float()
-        label_tensor = torch.from_numpy(label).long()
-        return image_tensor, label_tensor
 
     def __len__(self) -> int:
         return len(self.samples)

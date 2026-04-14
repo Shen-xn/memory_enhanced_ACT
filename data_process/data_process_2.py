@@ -127,7 +127,7 @@ def process_single_task(task_dir):
     os.makedirs(output_dir, exist_ok=True)
 
     rgb_files = natural_sort(glob.glob(os.path.join(rgb_dir, "*.jpg")))
-    depth_files = natural_sort(glob.glob(os.path.join(depth_dir, "*.jpg")))
+    depth_files = natural_sort(glob.glob(os.path.join(depth_dir, "*.png")))
 
     if not rgb_files or not depth_files:
         print("[WARN] 无图像文件")
