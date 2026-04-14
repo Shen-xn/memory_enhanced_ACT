@@ -23,15 +23,15 @@ class Config:
         self.TRAIN_MODE = ""
         self.RESUME_CKPT_PATH = ""
 
-        self.NUM_EPOCHS = 40
+        self.NUM_EPOCHS = 20
         self.BATCH_SIZE = 8
         self.NUM_WORKERS = 16
         self.FUTURE_STEPS = 10
 
         self.LR = 1e-5
         self.LR_BACKBONE = 1e-6
-        self.WEIGHT_DECAY = 1e-4
-        self.KL_WEIGHT = 0.1
+        self.WEIGHT_DECAY = 1e-5
+        self.KL_WEIGHT = 1
 
         self.VAL_FREQ = 1
         self.SAVE_FREQ = 5
