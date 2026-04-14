@@ -31,6 +31,21 @@ def load_excluded_tasks(data_root: str | Path) -> dict[str, str]:
     return exclusions
 
 
+def exclusion_reason_for_task(task_name: str, exclusions: Mapping[str, str]) -> str | None:
+    """Return the exclusion reason for a task or its obstacle counterpart."""
+    if task_name in exclusions:
+        return exclusions[task_name]
+    if task_name.startswith("task_obst_"):
+        source_name = "task_" + task_name[len("task_obst_") :]
+        return exclusions.get(source_name)
+    return None
+
+
+def is_task_excluded(task_name: str, exclusions: Mapping[str, str]) -> bool:
+    """Whether a task should be ignored, including obstacle variants of excluded sources."""
+    return exclusion_reason_for_task(task_name, exclusions) is not None
+
+
 def write_excluded_tasks(data_root: str | Path, exclusions: Mapping[str, str]) -> Path:
     path = exclusion_path(data_root)
     payload = {

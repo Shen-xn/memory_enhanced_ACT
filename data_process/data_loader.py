@@ -20,7 +20,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from data_process.exclusions import EXCLUSION_FILENAME, load_excluded_tasks
+from data_process.exclusions import EXCLUSION_FILENAME, is_task_excluded, load_excluded_tasks
 
 
 FIXED_JOINT_MIN = np.array([0, 100, 50, 50, 50, 150], dtype=np.float32)
@@ -274,7 +274,7 @@ class ImitationDataset(Dataset):
             before_count = len(task_dirs)
             task_dirs = [
                 d for d in task_dirs
-                if os.path.basename(d) not in excluded_tasks
+                if not is_task_excluded(os.path.basename(d), excluded_tasks)
             ]
             print(
                 f"[WARN] 根据 {EXCLUSION_FILENAME} 跳过 {before_count - len(task_dirs)} 个任务: "

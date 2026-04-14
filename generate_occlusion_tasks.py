@@ -25,7 +25,7 @@ from datetime import datetime
 import cv2
 import numpy as np
 
-from data_process.exclusions import EXCLUSION_FILENAME, load_excluded_tasks
+from data_process.exclusions import EXCLUSION_FILENAME, is_task_excluded, load_excluded_tasks
 
 
 DEFAULT_TRIGGER_PROB = 0.01
@@ -80,7 +80,7 @@ def list_source_tasks(data_root: str, task_filter: str | None = None) -> list[st
         name = os.path.basename(path)
         if not os.path.isdir(path):
             continue
-        if name in excluded_tasks:
+        if is_task_excluded(name, excluded_tasks):
             continue
         if name.startswith("task_obst_"):
             continue
@@ -107,7 +107,17 @@ def task_complete(source_task_dir: str, generated_task_dir: str) -> bool:
     src_frames = frame_paths(source_task_dir)
     dst_frames = frame_paths(generated_task_dir)
     meta_path = os.path.join(generated_task_dir, "occlusion_meta.json")
-    return bool(src_frames) and len(src_frames) == len(dst_frames) and os.path.exists(meta_path)
+    if not (bool(src_frames) and len(src_frames) == len(dst_frames) and os.path.exists(meta_path)):
+        return False
+
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return False
+
+    events = payload.get("events", [])
+    return isinstance(events, list) and len(events) > 0
 
 
 def ensure_clean_dir(path: str) -> None:
@@ -324,6 +334,13 @@ def save_json(path: str, payload: dict) -> None:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
+def choose_forced_start_frame(frame_count: int, rng: np.random.Generator) -> int | None:
+    """Pick one guaranteed occlusion start so every obstacle task contains at least one event."""
+    if frame_count <= MIN_OCCLUSION_START_FRAME:
+        return None
+    return int(rng.integers(MIN_OCCLUSION_START_FRAME, frame_count))
+
+
 def process_task(
     source_task_dir: str,
     generated_task_dir: str,
@@ -343,6 +360,8 @@ def process_task(
     occluder: Occluder | None = None
     current_event: dict | None = None
     events: list[dict] = []
+    forced_start_frame = choose_forced_start_frame(len(source_frames), rng)
+    forced_event_used = False
 
     for frame_idx, source_frame_path in enumerate(source_frames):
         frame_name = os.path.basename(source_frame_path)
@@ -350,9 +369,19 @@ def process_task(
         height, width = frame.shape[:2]
 
         can_start_occlusion = frame_idx >= MIN_OCCLUSION_START_FRAME
-        if can_start_occlusion and occluder is None and rng.random() < trigger_prob:
+        should_force_start = (
+            can_start_occlusion
+            and occluder is None
+            and len(events) == 0
+            and current_event is None
+            and forced_start_frame is not None
+            and frame_idx == forced_start_frame
+        )
+        should_random_start = can_start_occlusion and occluder is None and rng.random() < trigger_prob
+        if should_force_start or should_random_start:
             spawn_point = sample_spawn_point(width, height, rng)
             occluder = build_random_occluder(spawn_point, width, height, frame_idx, rng)
+            forced_event_used = forced_event_used or should_force_start
             current_event = {
                 "start_frame": frame_idx,
                 "start_image": frame_name,
@@ -397,6 +426,8 @@ def process_task(
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "frame_count": len(source_frames),
         "min_occlusion_start_frame": MIN_OCCLUSION_START_FRAME,
+        "forced_first_event_start_frame": forced_start_frame,
+        "forced_first_event_used": forced_event_used,
         "trigger_probability": trigger_prob,
         "cancel_probability": cancel_prob,
         "events": events,

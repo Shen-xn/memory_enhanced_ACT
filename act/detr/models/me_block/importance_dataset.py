@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from data_process.exclusions import EXCLUSION_FILENAME, load_excluded_tasks
+from data_process.exclusions import EXCLUSION_FILENAME, is_task_excluded, load_excluded_tasks
 
 from .me_block_config import ImportanceModelConfig, ImportanceTrainingConfig
 
@@ -65,7 +65,7 @@ def list_task_dirs(data_root: str, image_dirname: str = "auto") -> List[str]:
         for path in candidates
         if os.path.isdir(path)
         and "task_copy" not in path
-        and os.path.basename(os.path.normpath(path)) not in excluded_tasks
+        and not is_task_excluded(os.path.basename(os.path.normpath(path)), excluded_tasks)
         and resolve_task_image_dir(path, image_dirname)
     ]
     if excluded_tasks:
