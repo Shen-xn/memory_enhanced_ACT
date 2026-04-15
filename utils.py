@@ -56,7 +56,7 @@ def save_config_snapshot(config, save_dir, filename="config.json"):
     return config_path
 
 
-def append_metrics_record(save_dir, stage, epoch, metrics):
+def append_metrics_record(save_dir, stage, epoch, metrics, **extra_fields):
     """Append one structured metrics record to metrics.jsonl."""
     os.makedirs(save_dir, exist_ok=True)
     record = {
@@ -65,6 +65,7 @@ def append_metrics_record(save_dir, stage, epoch, metrics):
         "metrics": _to_serializable(metrics),
         "timestamp": datetime.now().isoformat(timespec="seconds"),
     }
+    record.update(_to_serializable(extra_fields))
     metrics_path = os.path.join(save_dir, "metrics.jsonl")
     with open(metrics_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -99,55 +100,80 @@ def restore_rng_state(state):
     return True
 
 # ===================== 可视化工具 =====================
+def _plot_metric_series(ax, xs, ys, label, color, linewidth=2, linestyle="-", marker=None, alpha=1.0):
+    if not xs or not ys:
+        return
+    xs = np.asarray(xs, dtype=np.float32)
+    ys = np.asarray(ys, dtype=np.float32)
+    valid = ~np.isnan(ys)
+    if not np.any(valid):
+        return
+    ax.plot(
+        xs[valid],
+        ys[valid],
+        label=label,
+        color=color,
+        linewidth=linewidth,
+        linestyle=linestyle,
+        marker=marker,
+        alpha=alpha,
+    )
+
+
 def plot_training_curves(train_metrics, val_metrics, val_obst_metrics, save_path):
     """
     绘制训练/验证损失曲线
     Args:
-        train_metrics: 训练指标字典，key为指标名，value为列表
-        val_metrics: 普通轨迹验证指标
-        val_obst_metrics: 障碍轨迹验证指标
+        train_metrics: 训练指标字典，使用 LOG_PRINT_FREQ 的批次级采样点
+        val_metrics: 普通轨迹验证指标（epoch 级）
+        val_obst_metrics: 障碍轨迹验证指标（epoch 级）
         save_path: 保存路径
     """
     plt.style.use("seaborn-v0_8")
     fig, axes = plt.subplots(2, 1, figsize=(12, 10))
-    
+
+    train_x = train_metrics.get("x", [])
+    val_x = val_metrics.get("x", [])
+    val_obst_x = val_obst_metrics.get("x", [])
+
     # 1. 总损失曲线
     ax1 = axes[0]
-    epochs = range(1, len(train_metrics["loss"]) + 1)
-    ax1.plot(epochs, train_metrics["loss"], label="Train Loss", color="blue", linewidth=2)
-    ax1.plot(epochs, val_metrics["loss"], label="Val (Normal) Loss", color="orange", linewidth=2)
-    ax1.plot(epochs, val_obst_metrics["loss"], label="Val (Obstacle) Loss", color="red", linewidth=2)
-    ax1.set_xlabel("Epoch")
+    _plot_metric_series(ax1, train_x, train_metrics.get("loss", []), label="Train Loss", color="blue", linewidth=1.8)
+    _plot_metric_series(ax1, val_x, val_metrics.get("loss", []), label="Val (Normal) Loss", color="orange", linewidth=2.2, marker="o")
+    _plot_metric_series(ax1, val_obst_x, val_obst_metrics.get("loss", []), label="Val (Obstacle) Loss", color="red", linewidth=2.2, marker="o")
+    ax1.set_xlabel("Epoch Progress")
     ax1.set_ylabel("Loss")
     ax1.set_title("Training/Validation Loss Curve")
     ax1.legend()
     ax1.grid(True)
-    
+
     # 2. 细分指标（ACTPolicy显示L1+KL，CNNMLPPolicy显示MSE）
     ax2 = axes[1]
     if "l1" in train_metrics:
         # ACTPolicy
-        ax2.plot(epochs, train_metrics["l1"], label="Train L1 Loss", color="green", linewidth=2)
-        ax2.plot(epochs, val_metrics["l1"], label="Val (Normal) L1 Loss", color="purple", linewidth=2)
-        ax2.plot(epochs, val_obst_metrics["l1"], label="Val (Obstacle) L1 Loss", color="brown", linewidth=2)
-        
+        _plot_metric_series(ax2, train_x, train_metrics.get("l1", []), label="Train L1 Loss", color="green", linewidth=1.8)
+        _plot_metric_series(ax2, val_x, val_metrics.get("l1", []), label="Val (Normal) L1 Loss", color="purple", linewidth=2.2, marker="o")
+        _plot_metric_series(ax2, val_obst_x, val_obst_metrics.get("l1", []), label="Val (Obstacle) L1 Loss", color="brown", linewidth=2.2, marker="o")
+
         ax2_twin = ax2.twinx()
-        ax2_twin.plot(epochs, train_metrics["kl"], label="Train KL Loss", color="cyan", linewidth=2, linestyle="--")
-        ax2_twin.plot(epochs, val_metrics["kl"], label="Val (Normal) KL Loss", color="magenta", linewidth=2, linestyle="--")
-        ax2_twin.plot(epochs, val_obst_metrics["kl"], label="Val (Obstacle) KL Loss", color="gray", linewidth=2, linestyle="--")
-        
+        _plot_metric_series(ax2_twin, train_x, train_metrics.get("kl", []), label="Train KL Loss", color="cyan", linewidth=1.8, linestyle="--")
+        _plot_metric_series(ax2_twin, val_x, val_metrics.get("kl", []), label="Val (Normal) KL Loss", color="magenta", linewidth=2.0, linestyle="--", marker="o")
+        _plot_metric_series(ax2_twin, val_obst_x, val_obst_metrics.get("kl", []), label="Val (Obstacle) KL Loss", color="gray", linewidth=2.0, linestyle="--", marker="o")
+
+        ax2.set_xlabel("Epoch Progress")
         ax2.set_ylabel("L1 Loss")
         ax2_twin.set_ylabel("KL Loss")
         # 合并图例
         lines1, labels1 = ax2.get_legend_handles_labels()
         lines2, labels2 = ax2_twin.get_legend_handles_labels()
         ax2.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
+        ax2.grid(True)
     else:
         # CNNMLPPolicy
-        ax2.plot(epochs, train_metrics["mse"], label="Train MSE Loss", color="green", linewidth=2)
-        ax2.plot(epochs, val_metrics["mse"], label="Val (Normal) MSE Loss", color="purple", linewidth=2)
-        ax2.plot(epochs, val_obst_metrics["mse"], label="Val (Obstacle) MSE Loss", color="brown", linewidth=2)
-        ax2.set_xlabel("Epoch")
+        _plot_metric_series(ax2, train_x, train_metrics.get("mse", []), label="Train MSE Loss", color="green", linewidth=1.8)
+        _plot_metric_series(ax2, val_x, val_metrics.get("mse", []), label="Val (Normal) MSE Loss", color="purple", linewidth=2.2, marker="o")
+        _plot_metric_series(ax2, val_obst_x, val_obst_metrics.get("mse", []), label="Val (Obstacle) MSE Loss", color="brown", linewidth=2.2, marker="o")
+        ax2.set_xlabel("Epoch Progress")
         ax2.set_ylabel("MSE Loss")
         ax2.legend()
         ax2.grid(True)

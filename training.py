@@ -87,6 +87,7 @@ def train_one_epoch(model, train_loader, optimizer, epoch, config, logger):
     device = get_device(config)
     model.train()
     train_metrics_list = []
+    train_curve_points = []
     total_batches = len(train_loader)
     
     pbar = tqdm(enumerate(train_loader), total=total_batches, desc=f"Train Epoch {epoch}")
@@ -134,13 +135,24 @@ def train_one_epoch(model, train_loader, optimizer, epoch, config, logger):
             log_str += " | ".join([f"{k}: {v:.4f}" for k, v in batch_metrics.items()])
             logger.info(log_str)
             pbar.set_postfix(**batch_metrics)
+            progress_x = (epoch - 1) + (batch_idx + 1) / max(total_batches, 1)
+            train_curve_points.append({"x": progress_x, **batch_metrics})
+            append_metrics_record(
+                config.EXP_LOG_DIR,
+                "train_log",
+                epoch,
+                batch_metrics,
+                batch=batch_idx + 1,
+                total_batches=total_batches,
+                x=progress_x,
+            )
     
     # 聚合训练指标
     train_metrics = aggregate_metrics(train_metrics_list)
     logger.info(f"===== Train Epoch {epoch} Summary =====")
     logger.info(" | ".join([f"{k}: {v:.4f}" for k, v in train_metrics.items()]))
     append_metrics_record(config.EXP_LOG_DIR, "train", epoch, train_metrics)
-    return train_metrics
+    return train_metrics, train_curve_points
 
 def validate(model, val_loader, config, logger, epoch, is_obst=False):
     """Validate on normal or obstacle trajectories only."""
@@ -269,9 +281,10 @@ def main():
             logger.info("该断点不含 RNG 状态，续训后 batch 顺序不会严格接续上次训练。")
     
     # 4. 训练过程记录
-    train_metrics_history = {k: [] for k in ["loss"] + (["l1", "kl"] if cfg.POLICY_CLASS == "ACTPolicy" else ["mse"])}
-    val_metrics_history = {k: [] for k in train_metrics_history.keys()}
-    val_obst_metrics_history = {k: [] for k in train_metrics_history.keys()}
+    tracked_metric_keys = ["loss"] + (["l1", "kl"] if cfg.POLICY_CLASS == "ACTPolicy" else ["mse"])
+    train_metrics_history = {"x": [], **{k: [] for k in tracked_metric_keys}}
+    val_metrics_history = {"x": [], **{k: [] for k in tracked_metric_keys}}
+    val_obst_metrics_history = {"x": [], **{k: [] for k in tracked_metric_keys}}
     
     # 5. 开始训练
     logger.info("===== 开始训练 =====")
@@ -284,11 +297,13 @@ def main():
         val_obst_metrics = None
 
         # 训练
-        train_metrics = train_one_epoch(model, train_loader, optimizer, epoch, cfg, logger)
-        
-        # 记录训练指标
-        for k in train_metrics_history.keys():
-            train_metrics_history[k].append(train_metrics.get(k, 0.0))
+        train_metrics, train_curve_points = train_one_epoch(model, train_loader, optimizer, epoch, cfg, logger)
+
+        # 记录训练曲线采样点（按 LOG_PRINT_FREQ）
+        for point in train_curve_points:
+            train_metrics_history["x"].append(point["x"])
+            for k in tracked_metric_keys:
+                train_metrics_history[k].append(point.get(k, float("nan")))
         
         # 验证
         if epoch % cfg.VAL_FREQ == 0 or epoch == cfg.NUM_EPOCHS:
@@ -301,8 +316,10 @@ def main():
                 val_obst_metrics = nan_metrics_like(val_metrics)
             
             # 记录验证指标
-            for k in val_metrics_history.keys():
-                val_metrics_history[k].append(val_metrics.get(k, 0.0))
+            val_metrics_history["x"].append(float(epoch))
+            val_obst_metrics_history["x"].append(float(epoch))
+            for k in tracked_metric_keys:
+                val_metrics_history[k].append(val_metrics.get(k, float("nan")))
                 val_obst_metrics_history[k].append(val_obst_metrics.get(k, float("nan")))
             
             # 保存可视化
