@@ -77,6 +77,7 @@ def _frame_id_from_path(path):
 
 
 def _index_image_paths_by_frame(paths):
+    """Build a frame-id -> file-path map and fail on duplicate ids."""
     frame_to_path = {}
     duplicates = []
     for path in paths:
@@ -102,6 +103,11 @@ def _frame_ids_from_dataframe(df):
 
 
 def _sample_shared_affine():
+    """Sample one affine transform shared by image and memory image.
+
+    Using the same transform keeps the current frame and its memory image in
+    register; otherwise we would teach the model mismatched geometry.
+    """
     return (
         np.random.uniform(-2.0, 2.0),
         np.random.uniform(0.98, 1.02),
@@ -258,6 +264,8 @@ class ImitationDataset(Dataset):
                 "请先运行 python prepare_act_data.py 重新生成并验证数据。"
             )
 
+        # In non-strict mode we keep only the intersection. In strict mode we
+        # should already have raised if anything was missing on either side.
         keep_mask = [int(frame_id) in frame_to_image for frame_id in frame_ids]
         aligned_df = df.loc[keep_mask].reset_index(drop=True)
         aligned_frame_ids = frame_ids[keep_mask]
@@ -288,8 +296,10 @@ class ImitationDataset(Dataset):
             img_dir = os.path.join(task_dir, "four_channel")
             csv_path = os.path.join(task_dir, "states_filtered.csv")
 
-            # --------------------- 检查 memory 图像文件夹 ---------------------
             mem_img_dir = os.path.join(task_dir, "memory_image_four_channel")
+            # Memory images are optional even in memory mode. Missing entries
+            # fall back to all-zero tensors so partially processed datasets can
+            # still be inspected or trained with explicit warnings.
             has_memory_folder = self.use_memory_image_input and os.path.exists(mem_img_dir)
 
             if not os.path.exists(img_dir) or not os.path.exists(csv_path):
@@ -326,8 +336,9 @@ class ImitationDataset(Dataset):
             missing_memory_count = 0
 
             for i in range(max_idx):
-                # --------------------- 拼接 memory 图像路径（严格同编号） ---------------------
                 mem_img_path = ""
+                # Memory image filenames are aligned by the same frame id as
+                # `four_channel`, so we reuse the current image basename.
                 if has_memory_folder:
                     frame_filename = os.path.basename(img_paths[i])
                     mem_img_path = os.path.join(mem_img_dir, frame_filename)
@@ -390,7 +401,11 @@ class ImitationDataset(Dataset):
         return mixed
 
     def _balance_obstacle_ratio(self, samples, seed):
-        """Downsample the larger normal/obstacle bucket when both are present."""
+        """Downsample the larger normal/obstacle bucket when both are present.
+
+        This keeps training batches from being overwhelmed by whichever bucket
+        happens to have many more samples after task-level splitting.
+        """
         obst_samples = [sample for sample in samples if sample["obst"]]
         normal_samples = [sample for sample in samples if not sample["obst"]]
         if not obst_samples or not normal_samples:
@@ -463,7 +478,13 @@ class ImitationDataset(Dataset):
         print(f"{self.mode.upper()} 集样本数：{len(self.samples)}")
 
     def _split_by_task_strict(self, train_ratio, seed):
-        """Split normal/obstacle source groups separately."""
+        """Split normal/obstacle source groups separately.
+
+        A single source trajectory may have both `task_xxx` and `task_obst_xxx`.
+        Grouping by source key prevents train/val leakage across those paired
+        variants, and splitting normal/obstacle groups separately reduces the
+        chance that one split ends up with only one category.
+        """
         task_to_obst = {}
         task_to_group = {}
         for sample in self.all_samples:
@@ -567,6 +588,8 @@ class ImitationDataset(Dataset):
             m_img_np = np.zeros_like(img_np)
 
         if self.mode == "train":
+            # Geometric augmentation must be shared between the main image and
+            # memory image so their spatial correspondence stays valid.
             angle, scale, tx, ty = _sample_shared_affine()
             img_np = _warp_bgra(img_np, angle, scale, tx, ty)
             m_img_np = _warp_bgra(m_img_np, angle, scale, tx, ty)
@@ -584,7 +607,7 @@ class ImitationDataset(Dataset):
 
         return img, curr, future, m_img, obst
 
-# ====================== 快速创建加载器 ======================
+# Convenience wrapper used by training.py.
 def get_data_loaders(
     data_root,
     future_steps=10,

@@ -9,7 +9,7 @@ from datetime import datetime
 
 # ===================== 日志配置 =====================
 def setup_logger(log_dir, exp_name):
-    """设置日志记录器"""
+    """Create a per-experiment logger with both console and file handlers."""
     logger = logging.getLogger(exp_name)
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -18,13 +18,13 @@ def setup_logger(log_dir, exp_name):
         handler.close()
         logger.removeHandler(handler)
     
-    # 控制台输出
+    # Console output is intentionally lightweight for interactive monitoring.
     ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
     ch_formatter = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     ch.setFormatter(ch_formatter)
     
-    # 文件输出
+    # File output keeps level names because it becomes the long-term record.
     log_file = os.path.join(log_dir, f"train_{exp_name}.log")
     fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
     fh.setLevel(logging.INFO)
@@ -37,6 +37,7 @@ def setup_logger(log_dir, exp_name):
 
 
 def _to_serializable(obj):
+    """Convert numpy-heavy objects into plain JSON-serializable Python values."""
     if isinstance(obj, dict):
         return {k: _to_serializable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -101,6 +102,7 @@ def restore_rng_state(state):
 
 # ===================== 可视化工具 =====================
 def _plot_metric_series(ax, xs, ys, label, color, linewidth=2, linestyle="-", marker=None, alpha=1.0):
+    """Plot one metric series while quietly skipping all-NaN inputs."""
     if not xs or not ys:
         return
     xs = np.asarray(xs, dtype=np.float32)
@@ -121,13 +123,10 @@ def _plot_metric_series(ax, xs, ys, label, color, linewidth=2, linestyle="-", ma
 
 
 def plot_training_curves(train_metrics, val_metrics, val_obst_metrics, save_path):
-    """
-    绘制训练/验证损失曲线
-    Args:
-        train_metrics: 训练指标字典，使用 LOG_PRINT_FREQ 的批次级采样点
-        val_metrics: 普通轨迹验证指标（epoch 级）
-        val_obst_metrics: 障碍轨迹验证指标（epoch 级）
-        save_path: 保存路径
+    """Render the standard training/validation curves used by this repo.
+
+    `train_metrics` contains sparse intra-epoch points sampled every
+    `LOG_PRINT_FREQ` batches. Validation metrics are epoch-level points.
     """
     plt.style.use("seaborn-v0_8")
     fig, axes = plt.subplots(2, 1, figsize=(12, 10))
@@ -136,7 +135,7 @@ def plot_training_curves(train_metrics, val_metrics, val_obst_metrics, save_path
     val_x = val_metrics.get("x", [])
     val_obst_x = val_obst_metrics.get("x", [])
 
-    # 1. 总损失曲线
+    # Top panel: overall loss for train / val-normal / val-obstacle.
     ax1 = axes[0]
     _plot_metric_series(ax1, train_x, train_metrics.get("loss", []), label="Train Loss", color="blue", linewidth=1.8)
     _plot_metric_series(ax1, val_x, val_metrics.get("loss", []), label="Val (Normal) Loss", color="orange", linewidth=2.2, marker="o")
@@ -147,7 +146,7 @@ def plot_training_curves(train_metrics, val_metrics, val_obst_metrics, save_path
     ax1.legend()
     ax1.grid(True)
 
-    # 2. 细分指标（ACTPolicy显示L1+KL，CNNMLPPolicy显示MSE）
+    # Bottom panel: policy-specific detail metrics.
     ax2 = axes[1]
     if "l1" in train_metrics:
         # ACTPolicy
@@ -163,7 +162,7 @@ def plot_training_curves(train_metrics, val_metrics, val_obst_metrics, save_path
         ax2.set_xlabel("Epoch Progress")
         ax2.set_ylabel("L1 Loss")
         ax2_twin.set_ylabel("KL Loss")
-        # 合并图例
+        # Merge legends from the left and right y-axes.
         lines1, labels1 = ax2.get_legend_handles_labels()
         lines2, labels2 = ax2_twin.get_legend_handles_labels()
         ax2.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
@@ -184,17 +183,7 @@ def plot_training_curves(train_metrics, val_metrics, val_obst_metrics, save_path
 
 # ===================== 模型保存/加载 =====================
 def save_checkpoint(epoch, model, optimizer, config, metrics, is_best, save_dir):
-    """
-    保存模型检查点
-    Args:
-        epoch: 当前轮数
-        model: 模型实例
-        optimizer: 优化器
-        config: 配置实例
-        metrics: 当前指标
-        is_best: 是否为最优模型
-        save_dir: 保存目录
-    """
+    """Save a full training checkpoint plus `best_model.pth` when applicable."""
     ckpt = {
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
@@ -205,11 +194,11 @@ def save_checkpoint(epoch, model, optimizer, config, metrics, is_best, save_dir)
         "rng_state": capture_rng_state(),
     }
     
-    # 保存普通ckpt
+    # Always keep the epoch checkpoint.
     ckpt_path = os.path.join(save_dir, f"ckpt_epoch_{epoch}.pth")
     torch.save(ckpt, ckpt_path)
     
-    # 保存最优模型
+    # Mirror the current checkpoint to a stable path for deployment/export scripts.
     if is_best:
         best_ckpt_path = os.path.join(save_dir, "best_model.pth")
         torch.save(ckpt, best_ckpt_path)
@@ -217,15 +206,7 @@ def save_checkpoint(epoch, model, optimizer, config, metrics, is_best, save_dir)
     return ckpt_path
 
 def load_checkpoint(ckpt_path, model, optimizer):
-    """
-    加载模型检查点
-    Args:
-        ckpt_path: 检查点路径
-        model: 模型实例
-        optimizer: 优化器实例
-    Returns:
-        ckpt: 检查点字典
-    """
+    """Load model/optimizer state from a checkpoint and return the payload."""
     ckpt = torch.load(
         ckpt_path,
         map_location="cuda" if torch.cuda.is_available() else "cpu",
@@ -238,13 +219,7 @@ def load_checkpoint(ckpt_path, model, optimizer):
 
 # ===================== 指标计算 =====================
 def compute_metrics(loss_dict):
-    """
-    计算批次指标（平均）
-    Args:
-        loss_dict: 损失字典
-    Returns:
-        avg_metrics: 平均指标字典
-    """
+    """Convert a loss dict into plain scalar metrics for logging/serialization."""
     avg_metrics = {}
     for k, v in loss_dict.items():
         if isinstance(v, torch.Tensor):
@@ -254,13 +229,7 @@ def compute_metrics(loss_dict):
     return avg_metrics
 
 def aggregate_metrics(metrics_list):
-    """
-    聚合多个批次的指标
-    Args:
-        metrics_list: 指标列表（每个元素是批次指标字典）
-    Returns:
-        agg_metrics: 聚合后的指标字典（平均值）
-    """
+    """Average the same metric keys across a list of per-batch metric dicts."""
     agg_metrics = {}
     for k in metrics_list[0].keys():
         agg_metrics[k] = np.mean([m[k] for m in metrics_list])

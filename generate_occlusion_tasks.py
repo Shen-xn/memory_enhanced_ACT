@@ -36,6 +36,7 @@ MIN_OCCLUSION_START_FRAME = 1
 
 @dataclass
 class Occluder:
+    """A moving synthetic object pasted onto a four-channel frame sequence."""
     center: np.ndarray
     velocity: np.ndarray
     relative_polygon: np.ndarray
@@ -73,6 +74,7 @@ def get_data_root() -> str:
 
 
 def list_source_tasks(data_root: str, task_filter: str | None = None) -> list[str]:
+    """List normal source tasks that can be converted into obstacle variants."""
     candidates = sorted(glob.glob(os.path.join(data_root, "task_*")))
     excluded_tasks = load_excluded_tasks(data_root)
     tasks = []
@@ -104,6 +106,7 @@ def frame_paths(task_dir: str) -> list[str]:
 
 
 def task_complete(source_task_dir: str, generated_task_dir: str) -> bool:
+    """Treat a generated task as complete only if frames and metadata both exist."""
     src_frames = frame_paths(source_task_dir)
     dst_frames = frame_paths(generated_task_dir)
     meta_path = os.path.join(generated_task_dir, "occlusion_meta.json")
@@ -160,6 +163,7 @@ def _build_occluder_textures(
     base_radius: float,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Create RGB/depth/alpha textures for a polygonal occluder patch."""
     soft_edge = max(2, int(base_radius * 0.035))
     min_xy = np.floor(polygon.min(axis=0)).astype(np.int32) - soft_edge * 2
     max_xy = np.ceil(polygon.max(axis=0)).astype(np.int32) + soft_edge * 2
@@ -221,6 +225,7 @@ def build_random_occluder(
     frame_idx: int,
     rng: np.random.Generator,
 ) -> Occluder:
+    """Sample one irregular moving occluder with plausible RGB/depth texture."""
     min_dim = min(width, height)
     base_radius = float(rng.uniform(0.05, 0.7) * min_dim)
     num_vertices = int(rng.integers(7, 13))
@@ -258,6 +263,12 @@ def build_random_occluder(
 
 
 def apply_occluder(frame: np.ndarray, occluder: Occluder, rng: np.random.Generator) -> np.ndarray:
+    """Composite one occluder into a BGRA frame.
+
+    RGB uses soft alpha blending, while depth is mostly overwritten with the
+    synthetic occluder depth plus a noisy boundary band to mimic real sensor
+    edge artifacts.
+    """
     output = frame.copy()
     height, width = frame.shape[:2]
 
@@ -348,6 +359,7 @@ def process_task(
     trigger_prob: float,
     cancel_prob: float,
 ) -> None:
+    """Generate one `task_obst_*` directory from a normal source task."""
     source_name = os.path.basename(source_task_dir)
     target_name = os.path.basename(generated_task_dir)
     source_frames = frame_paths(source_task_dir)
@@ -377,6 +389,8 @@ def process_task(
             and forced_start_frame is not None
             and frame_idx == forced_start_frame
         )
+        # The first event is guaranteed by `forced_start_frame`; later events
+        # remain stochastic so obstacle timing still varies task to task.
         should_random_start = can_start_occlusion and occluder is None and rng.random() < trigger_prob
         if should_force_start or should_random_start:
             spawn_point = sample_spawn_point(width, height, rng)

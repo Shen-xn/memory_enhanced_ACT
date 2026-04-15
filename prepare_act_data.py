@@ -51,6 +51,12 @@ GRIPPER_META_NAME = "gripper_amplification.json"
 
 @dataclass
 class ValidationResult:
+    """Collect validation issues for one task directory.
+
+    `exclude_reason` is different from a normal warning: it means the task is
+    structurally valid enough to inspect, but should be skipped by training
+    because its joint values exceed the agreed physical limits.
+    """
     task_name: str
     ok: bool = True
     errors: list[str] = field(default_factory=list)
@@ -72,6 +78,7 @@ class ValidationResult:
 
 @dataclass
 class GripperAmplifyResult:
+    """Human-readable summary for one task after j10 amplification."""
     task_name: str
     ok: bool
     skipped: bool = False
@@ -88,6 +95,7 @@ class GripperAmplifyResult:
 
 
 def natural_sort(paths: Iterable[Path]) -> list[Path]:
+    """Sort paths using numeric chunks so frame/task ids stay in human order."""
     def key(path: Path):
         parts = re.split(r"(\d+)", path.name)
         return [int(part) if part.isdigit() else part.lower() for part in parts]
@@ -182,6 +190,7 @@ def validate_frame_files(
     suffix: str,
     required: bool = True,
 ) -> set[int]:
+    """Return discovered frame ids and attach any file-level problems to `result`."""
     directory = task_dir / subdir
     if not directory.exists():
         if required:
@@ -202,6 +211,7 @@ def validate_frame_files(
 
 
 def validate_task(task_dir: Path, future_steps: int, sample_images: bool = True) -> ValidationResult:
+    """Validate one task against the exact assumptions used by the ACT loader."""
     result = ValidationResult(task_name=task_dir.name)
     csv_path = task_dir / "states_filtered.csv"
     four_dir = task_dir / "four_channel"
@@ -285,6 +295,7 @@ def validate_task(task_dir: Path, future_steps: int, sample_images: bool = True)
 
 
 def _gripper_source_csv(task_dir: Path, refresh_backup: bool) -> tuple[Path, Path]:
+    """Return the live CSV path plus the stable pre-amplification backup."""
     csv_path = task_dir / "states_filtered.csv"
     backup_path = task_dir / GRIPPER_BACKUP_NAME
     if refresh_backup or not backup_path.exists():
@@ -356,6 +367,8 @@ def amplify_gripper_trajectories(
     )
 
     for task_dir, csv_path, backup_path, df, before in loaded:
+        # Expand around the global mean rather than around zero so the gripper
+        # keeps its nominal operating point while gaining motion range.
         expanded = center + scale * (before - center)
         clipped_low = int((expanded < lower).sum())
         clipped_high = int((expanded > upper).sum())
@@ -423,6 +436,7 @@ def amplify_gripper_trajectories(
 
 
 def run_prepare(args: argparse.Namespace) -> int:
+    """Run the official preprocessing pipeline in the canonical order."""
     data_root = Path(args.data_root).resolve()
     tasks = discover_tasks(data_root)
     print(f"[INFO] data_root={data_root}")
@@ -447,16 +461,21 @@ def run_prepare(args: argparse.Namespace) -> int:
         print(f"[CSV] total incomplete raw rows={total_incomplete}")
         print_step_done(step_start, f"cleaned {len(raw_tasks)} raw task(s), rows={clean_rows}, incomplete_rows={total_incomplete}")
 
+        # `data_process_1` removes bad rows/frames and aligns trajectories with images.
         step_start = print_step_banner(2, 5, "Sync/filter trajectories and raw images")
         for task_dir in raw_tasks:
             data_process_1.process_single_task(str(task_dir))
         print_step_done(step_start, f"processed {len(raw_tasks)} raw task(s)")
 
+        # `data_process_2` is the point where RGB + normalized depth become the
+        # stable BGRA training format consumed by the loader and deployment.
         step_start = print_step_banner(3, 5, "Rebuild four_channel images")
         for task_dir in raw_tasks:
             data_process_2.process_single_task(str(task_dir))
         print_step_done(step_start, f"rebuilt four_channel for {len(raw_tasks)} raw task(s)")
 
+        # The gripper amplitude pass is intentionally after image rebuilding:
+        # it only rewrites `states_filtered.csv`, not image files.
         step_start = print_step_banner(4, 5, "Amplify gripper trajectory")
         gripper_results = amplify_gripper_trajectories(
             tasks,

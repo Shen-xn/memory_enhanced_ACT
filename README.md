@@ -2,6 +2,16 @@
 
 ## ACT Visual Modes
 
+Quick clarification for current code behavior:
+
+- `baseline ACT` is not a single fixed mode anymore. It includes:
+  - `RGB baseline`: `USE_MEMORY_IMAGE_INPUT=False`, `IMAGE_CHANNELS=3`
+  - `RGBD baseline`: `USE_MEMORY_IMAGE_INPUT=False`, `IMAGE_CHANNELS=4`
+- `RGBD + memory` is `USE_MEMORY_IMAGE_INPUT=True`, `IMAGE_CHANNELS=4`
+- Disk data and ROS/deploy entrypoints still stay unified as `four_channel` / `BGRA`
+- RGB baseline does not require rebuilding data; the loader and deploy wrapper just ignore the depth channel
+- The current default in [`config.py`](./config.py) is `IMAGE_CHANNELS=4`, so running `python training.py` with defaults trains `RGBD baseline`, not `RGB baseline`
+
 当前 ACT 主线支持三种视觉模式，尽量共用同一套 dataloader、backbone、policy 和部署 wrapper：
 
 - RGB baseline: `USE_MEMORY_IMAGE_INPUT=False`, `IMAGE_CHANNELS=3`
@@ -157,6 +167,14 @@ joint_rng = [1000, 700, 600, 850, 900, 550]
 
 ## ACT 训练
 
+Mode selection summary:
+
+- `USE_MEMORY_IMAGE_INPUT = False` + `IMAGE_CHANNELS = 3`: RGB baseline
+- `USE_MEMORY_IMAGE_INPUT = False` + `IMAGE_CHANNELS = 4`: RGBD baseline
+- `USE_MEMORY_IMAGE_INPUT = True` + `IMAGE_CHANNELS = 4`: RGBD + memory
+
+If you simply run `python training.py` with the current default config, you are training the RGBD baseline.
+
 主训练开关在 [`config.py`](./config.py)：
 
 - `USE_MEMORY_IMAGE_INPUT = False`：baseline 单图 ACT
@@ -194,6 +212,16 @@ RESUME_CKPT_PATH = "你的 checkpoint 路径"
 ## 你后面在正式机器上的推荐顺序
 
 ### 路线 A：baseline ACT
+
+This route applies to both RGB baseline and RGBD baseline.
+
+Before training, set:
+
+- `USE_MEMORY_IMAGE_INPUT = False`
+- `IMAGE_CHANNELS = 3` for RGB baseline
+- `IMAGE_CHANNELS = 4` for RGBD baseline
+
+The export command and `me_act_baseline.launch.py` are shared by both baseline variants. The actual channel count is read from `deploy_config.yml -> image_channels`.
 
 适用场景：
 

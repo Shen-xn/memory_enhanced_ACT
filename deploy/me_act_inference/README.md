@@ -8,9 +8,21 @@
 
 ## 运行模式
 
+Current mapping:
+
+- `me_act_baseline.launch.py` serves both RGB baseline and RGBD baseline
+- The difference is encoded in `deploy_config.yml -> image_channels`
+- `image_channels: 3` means RGB baseline
+- `image_channels: 4` plus no memory input means RGBD baseline
+- `me_act_memory.launch.py` is only for RGBD + memory
+
 ### RGB baseline
 
 RGB baseline 的 artifact 会在 `deploy_config.yml` 里写入 `image_channels: 3`。ROS 节点仍然构造 BGRA 输入，TorchScript wrapper 会忽略 depth 通道，所以相机同步和 C++ preprocessing 不需要分叉。
+
+### RGBD baseline
+
+RGBD baseline 仍然使用同一个 `me_act_baseline.launch.py`。区别只在于导出目录里的 `deploy_config.yml` 会写入 `image_channels: 4`，TorchScript wrapper 会把 BGRA 里的 4 个通道都送进 ACT。
 
 ### baseline ACT
 
