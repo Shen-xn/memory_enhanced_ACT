@@ -28,8 +28,8 @@ import numpy as np
 from data_process.exclusions import EXCLUSION_FILENAME, is_task_excluded, load_excluded_tasks
 
 
-DEFAULT_TRIGGER_PROB = 0.02
-DEFAULT_CANCEL_PROB = 0.05
+DEFAULT_TRIGGER_PROB = 0.05
+DEFAULT_CANCEL_PROB = 0.04
 DEFAULT_SEED = 42
 MIN_OCCLUSION_START_FRAME = 1
 
