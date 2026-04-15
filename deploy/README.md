@@ -2,6 +2,15 @@
 
 ## Visual Modes
 
+Current baseline terminology:
+
+- `baseline` includes two single-image ACT variants
+- `image_channels=3`: RGB baseline
+- `image_channels=4` with `use_memory_image_input=false`: RGBD baseline
+- `image_channels=4` with `use_memory_image_input=true`: RGBD + memory
+
+Both baseline variants use the same `deploy_artifacts_baseline` structure and the same baseline ROS launch. The exported `deploy_config.yml` decides whether the wrapper feeds 3 or 4 channels into ACT.
+
 导出的 ACT artifact 会记录 `image_channels`：
 
 - `image_channels=3`: RGB baseline。部署侧仍接收 BGRA 图像，但 TorchScript wrapper 只取 RGB 三通道喂给 ACT。
@@ -29,6 +38,8 @@ joint_rng = [1000, 700, 600, 850, 900, 550]
 ## 导出 TorchScript
 
 ### baseline ACT
+
+This section applies to both RGB baseline and RGBD baseline.
 
 ```powershell
 python deploy/export_torchscript_models.py `
