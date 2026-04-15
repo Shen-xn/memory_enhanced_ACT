@@ -18,10 +18,10 @@ from scipy.signal import savgol_filter
 from tqdm import tqdm
 
 
-DISTANCE_THRESHOLD = 2.5
+DISTANCE_THRESHOLD = 10
 DEPTH_CLIP_MIN = 0
 DEPTH_CLIP_MAX = 800
-WINDOW_SIZE = 5
+WINDOW_SIZE = 10
 POLY_ORDER = 2
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
