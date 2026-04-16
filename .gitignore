@@ -7,6 +7,11 @@ data
 .deploy_artifacts_test
 deploy_artifacts_baseline/
 deploy_artifacts_test/
+deploy_artifacts_baseline_filter10/
+deploy/analyze_artifact_trajectory.py
+deploy/analyze_cmd_horizons.py
+deploy/evaluate_torchscript_artifact.py
+deploy/visualize_cmd0_to_cmd5.py
 log
 data_local
 .vscode
