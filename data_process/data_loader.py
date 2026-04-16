@@ -167,7 +167,9 @@ def _format_joint_range_errors(samples, joint_min, joint_max, limit=8):
     """Build a compact error message for samples outside fixed joint limits."""
     bad = []
     for sample in samples:
-        values = np.vstack([sample["curr"].reshape(1, -1), sample["future"]])
+        curr = sample["curr_raw"] if "curr_raw" in sample else sample["curr"]
+        future = sample["future_raw"] if "future_raw" in sample else sample["future"]
+        values = np.vstack([curr.reshape(1, -1), future])
         mask = (values < joint_min.reshape(1, -1)) | (values > joint_max.reshape(1, -1))
         if not mask.any():
             continue
@@ -185,7 +187,7 @@ class ImitationDataset(Dataset):
     Each item contains:
     - current image: [C, H, W]
     - current normalized qpos: [state_dim]
-    - future normalized actions: [future_steps, state_dim]
+    - future action targets: [future_steps, state_dim]
     - memory image: [C, H, W], zero when unavailable
     - obstacle flag: [1]
     """
@@ -201,6 +203,8 @@ class ImitationDataset(Dataset):
         strict_alignment=True,
         joint_min_max=None,
         image_channels=4,
+        target_mode="absolute",
+        delta_qpos_scale=10.0,
     ):
         self.data_root = data_root
         self.future_steps = future_steps
@@ -215,6 +219,12 @@ class ImitationDataset(Dataset):
         self.strict_alignment = strict_alignment
         self.joint_min_max = joint_min_max
         self.seed = seed
+        self.target_mode = str(target_mode).lower()
+        self.delta_qpos_scale = float(delta_qpos_scale)
+        if self.target_mode not in ("absolute", "delta"):
+            raise ValueError(f"target_mode must be 'absolute' or 'delta', got {target_mode}")
+        if self.target_mode == "delta" and self.delta_qpos_scale <= 0:
+            raise ValueError("delta_qpos_scale must be > 0 when target_mode='delta'.")
         
         self.all_samples = self._load_all_samples()
         self._split_by_task_strict(train_ratio, seed)
@@ -224,7 +234,7 @@ class ImitationDataset(Dataset):
         
         if normalize_joints:
             self._validate_joint_ranges()
-            self._normalize_joints()
+        self._prepare_model_inputs_and_targets()
 
     def _align_dataframe_and_images(self, task_name, img_paths, df, joint_cols):
         """Strictly align `states_filtered.csv` with image files by frame id."""
@@ -350,8 +360,8 @@ class ImitationDataset(Dataset):
                     "img_path": img_paths[i],
                     "mem_img_path": mem_img_path,
                     "has_mem_img": has_mem_img,
-                    "curr": df.iloc[i][joint_cols].values.astype(np.float32),
-                    "future": df.iloc[i+1 : i+1+self.future_steps][joint_cols].values.astype(np.float32),
+                    "curr_raw": df.iloc[i][joint_cols].values.astype(np.float32),
+                    "future_raw": df.iloc[i+1 : i+1+self.future_steps][joint_cols].values.astype(np.float32),
                     "task": task_dir,
                     "frame_index": i,
                     # The first frame of a trajectory is the reset/context
@@ -554,13 +564,25 @@ class ImitationDataset(Dataset):
 
         print(f"{self.mode.upper()} samples: {len(self.samples)}")
 
-    def _normalize_joints(self):
-        """Normalize qpos/actions with fixed robot limits, not dataset statistics."""
-        jmin = self.joint_min_max["min"]
-        jrng = self.joint_min_max["rng"]
+    def _prepare_model_inputs_and_targets(self):
+        """Populate model-facing qpos/action tensors from raw trajectory values."""
+        if self.normalize_joints:
+            jmin = self.joint_min_max["min"]
+            jrng = self.joint_min_max["rng"]
         for s in self.samples:
-            s["curr"] = (s["curr"] - jmin) / jrng
-            s["future"] = (s["future"] - jmin) / jrng
+            curr_raw = s["curr_raw"]
+            future_raw = s["future_raw"]
+            if self.normalize_joints:
+                s["curr"] = (curr_raw - jmin) / jrng
+            else:
+                s["curr"] = curr_raw.copy()
+
+            if self.target_mode == "delta":
+                s["future"] = (future_raw - curr_raw.reshape(1, -1)) / self.delta_qpos_scale
+            elif self.normalize_joints:
+                s["future"] = (future_raw - jmin.reshape(1, -1)) / jrng.reshape(1, -1)
+            else:
+                s["future"] = future_raw.copy()
 
     def _validate_joint_ranges(self):
         """Fail fast if data falls outside the fixed physical joint limits."""
@@ -615,6 +637,8 @@ def get_data_loaders(
     batch_size=8,
     num_workers=0,
     image_channels=4,
+    target_mode="absolute",
+    delta_qpos_scale=10.0,
 ):
     """Create train/val dataloaders with the same alignment and normalization rules."""
     train_dataset = ImitationDataset(
@@ -623,6 +647,8 @@ def get_data_loaders(
         use_memory_image_input=use_memory_image_input,
         mode="train",
         image_channels=image_channels,
+        target_mode=target_mode,
+        delta_qpos_scale=delta_qpos_scale,
     )
     val_dataset = ImitationDataset(
         data_root,
@@ -631,6 +657,8 @@ def get_data_loaders(
         mode="val",
         joint_min_max=train_dataset.joint_min_max,
         image_channels=image_channels,
+        target_mode=target_mode,
+        delta_qpos_scale=delta_qpos_scale,
     )
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)

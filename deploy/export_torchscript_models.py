@@ -77,6 +77,8 @@ def normalize_act_config(payload: Dict) -> Dict:
         "lr_backbone": payload.get("LR_BACKBONE", 1e-5),
         "weight_decay": payload.get("WEIGHT_DECAY", 1e-4),
         "kl_weight": payload.get("KL_WEIGHT", _pick(payload, "kl_weight", 1.0)),
+        "predict_delta_qpos": bool(payload.get("PREDICT_DELTA_QPOS", _pick(payload, "predict_delta_qpos", False))),
+        "delta_qpos_scale": float(payload.get("DELTA_QPOS_SCALE", _pick(payload, "delta_qpos_scale", 10.0))),
         "camera_names": payload.get("CAMERA_NAMES", _pick(payload, "camera_names", ["gemini"])),
         "use_memory_image_input": bool(use_memory),
         "image_channels": image_channels,
@@ -168,6 +170,8 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
             joint_min=joint_stats["min"],
             joint_rng=joint_stats["rng"],
             image_channels=image_channels,
+            predict_delta_qpos=bool(normalized_act_config["predict_delta_qpos"]),
+            delta_qpos_scale=float(normalized_act_config["delta_qpos_scale"]),
         ).to(device)
         act_examples = (
             torch.zeros(1, act_policy.model.action_head.out_features, device=device),
@@ -180,6 +184,8 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
             joint_min=joint_stats["min"],
             joint_rng=joint_stats["rng"],
             image_channels=image_channels,
+            predict_delta_qpos=bool(normalized_act_config["predict_delta_qpos"]),
+            delta_qpos_scale=float(normalized_act_config["delta_qpos_scale"]),
         ).to(device)
         act_examples = (
             torch.zeros(1, act_policy.model.action_head.out_features, device=device),
@@ -214,6 +220,8 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
         "state_dim": int(act_policy.model.action_head.out_features),
         "num_queries": int(act_policy.model.num_queries),
         "image_channels": int(image_channels),
+        "predict_delta_qpos": bool(normalized_act_config["predict_delta_qpos"]),
+        "delta_qpos_scale": float(normalized_act_config["delta_qpos_scale"]),
         "use_memory_image_input": use_memory_image_input,
         "has_me_block": has_me_block,
         "me_block_num_classes": int(num_me_classes),

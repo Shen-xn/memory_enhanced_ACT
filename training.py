@@ -257,6 +257,8 @@ def main():
         batch_size=cfg.BATCH_SIZE,
         num_workers=cfg.NUM_WORKERS,
         image_channels=cfg.IMAGE_CHANNELS,
+        target_mode="delta" if cfg.PREDICT_DELTA_QPOS else "absolute",
+        delta_qpos_scale=cfg.DELTA_QPOS_SCALE,
     )
     
     # Build the selected policy after config/model params are finalized.

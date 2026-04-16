@@ -29,6 +29,8 @@ class Config:
         self.BATCH_SIZE = 8
         self.NUM_WORKERS = 16
         self.FUTURE_STEPS = 10
+        self.PREDICT_DELTA_QPOS = True
+        self.DELTA_QPOS_SCALE = 10.0
 
         self.LR = 1e-5
         self.LR_BACKBONE = 1e-6
@@ -136,6 +138,8 @@ class Config:
             "nheads": self.NHEADS,
             "num_queries": self.NUM_QUERIES,
             "state_dim": self.STATE_DIM,
+            "predict_delta_qpos": self.PREDICT_DELTA_QPOS,
+            "delta_qpos_scale": self.DELTA_QPOS_SCALE,
             # 兼容备用/扩展路径
             # Compatibility / reserved fields used by adjacent ACT code paths.
             "masks": self.MASKS,
