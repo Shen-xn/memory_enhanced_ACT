@@ -316,7 +316,7 @@ def main():
         # 学习率预热：只有从头开始训练的第一个epoch使用1/10的学习率
         # 如果是断点续训，跳过预热
         if epoch == 1 and resume_ckpt is None:
-            warmup_factor = 0.1  # 1/10的学习率
+            warmup_factor = 1.0  # 1/10的学习率
             
             # 设置预热学习率
             for i, param_group in enumerate(optimizer.param_groups):

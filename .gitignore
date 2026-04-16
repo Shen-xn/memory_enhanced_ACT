@@ -3,10 +3,8 @@ logs
 wandb
 outputs
 data
-.deploy_artifacts_baseline
-.deploy_artifacts_test
-deploy_artifacts_baseline/
-deploy_artifacts_test/
+.deploy_artifacts_*
+deploy_artifacts_*/
 deploy_artifacts_baseline_filter10/
 deploy/analyze_artifact_trajectory.py
 deploy/analyze_cmd_horizons.py

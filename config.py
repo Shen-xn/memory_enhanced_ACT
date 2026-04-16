@@ -23,7 +23,7 @@ class Config:
         self.TRAIN_MODE = ""
         self.RESUME_CKPT_PATH = ""
 
-        self.NUM_EPOCHS = 25
+        self.NUM_EPOCHS = 40
         self.BATCH_SIZE = 8
         self.NUM_WORKERS = 16
         self.FUTURE_STEPS = 10
@@ -32,7 +32,7 @@ class Config:
 
         self.LR = 1e-4
         self.LR_BACKBONE = 1e-5
-        self.WEIGHT_DECAY = 1e-5
+        self.WEIGHT_DECAY = 1e-4
         self.KL_WEIGHT = 1
 
         self.VAL_FREQ = 1
@@ -63,9 +63,9 @@ class Config:
 
         self.ENC_LAYERS_ENC = 4
         self.ENC_LAYERS = 4
-        self.DEC_LAYERS = 7
+        self.DEC_LAYERS = 4
         self.DROPOUT = 0.1
-        self.DIM_FEEDFORWARD = 3200
+        self.DIM_FEEDFORWARD = 1024
         self.HIDDEN_DIM = 512
         self.NHEADS = 8
         self.NUM_QUERIES = self.FUTURE_STEPS
