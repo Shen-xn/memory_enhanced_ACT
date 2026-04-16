@@ -18,7 +18,7 @@ from scipy.signal import savgol_filter
 from tqdm import tqdm
 
 
-DISTANCE_THRESHOLD = 10
+DISTANCE_THRESHOLD = 20
 DEPTH_CLIP_MIN = 0
 DEPTH_CLIP_MAX = 800
 WINDOW_SIZE = 10

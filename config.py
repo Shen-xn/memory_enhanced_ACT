@@ -24,25 +24,25 @@ class Config:
         self.RESUME_CKPT_PATH = ""
 
         self.NUM_EPOCHS = 40
-        self.BATCH_SIZE = 8
-        self.NUM_WORKERS = 16
+        self.BATCH_SIZE = 32
+        self.NUM_WORKERS = 8
         self.FUTURE_STEPS = 10
         self.PREDICT_DELTA_QPOS = True
         self.DELTA_QPOS_SCALE = 10.0
 
-        self.LR = 1e-4
-        self.LR_BACKBONE = 1e-5
+        self.LR = 2e-5
+        self.LR_BACKBONE = 2e-6
         self.WEIGHT_DECAY = 1e-4
-        self.KL_WEIGHT = 1
-        self.ACTION_L1_WEIGHT = 1e-3
+        self.KL_WEIGHT = 2
+        self.ACTION_L1_WEIGHT = 1e-4
 
         self.VAL_FREQ = 1
         self.SAVE_FREQ = 5
-        self.LOG_PRINT_FREQ = 500
+        self.LOG_PRINT_FREQ = 200
         self.SAVE_PLOT = True
         self.PRINT_LOG = True
 
-        self.SEED = 42
+        self.SEED = 1
         self.USE_CUDA = torch.cuda.is_available()
 
         # ===================== 策略 / 模型选择 =====================
