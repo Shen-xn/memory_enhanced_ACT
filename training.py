@@ -302,10 +302,46 @@ def main():
     val_has_obstacle = bool(getattr(val_loader.dataset, "split_has_obstacle_samples", False))
     if not val_has_obstacle:
         logger.info("===== validation split has no obstacle samples; val_obst will be skipped =====")
+    
+    # 保存原始学习率用于预热
+    original_lrs = []
+    for param_group in optimizer.param_groups:
+        original_lrs.append(param_group['lr'])
+    
     for epoch in range(start_epoch, cfg.NUM_EPOCHS + 1):
         is_best = False
         val_metrics = None
         val_obst_metrics = None
+
+        # 学习率预热：只有从头开始训练的第一个epoch使用1/10的学习率
+        # 如果是断点续训，跳过预热
+        if epoch == 1 and resume_ckpt is None:
+            warmup_factor = 0.1  # 1/10的学习率
+            
+            # 设置预热学习率
+            for i, param_group in enumerate(optimizer.param_groups):
+                param_group['lr'] = original_lrs[i] * warmup_factor
+            
+            # 记录日志
+            if len(optimizer.param_groups) >= 2:
+                logger.info(f"===== 学习率预热: Epoch {epoch} 使用 {warmup_factor*100}% 学习率 =====")
+                logger.info(f"  主网络: {optimizer.param_groups[0]['lr']:.2e} (原始: {original_lrs[0]:.2e})")
+                logger.info(f"  Backbone: {optimizer.param_groups[1]['lr']:.2e} (原始: {original_lrs[1]:.2e})")
+            else:
+                logger.info(f"===== 学习率预热: Epoch {epoch} 使用 {warmup_factor*100}% 学习率 =====")
+                logger.info(f"  学习率: {optimizer.param_groups[0]['lr']:.2e} (原始: {original_lrs[0]:.2e})")
+        elif epoch == 2 and resume_ckpt is None:
+            # 从第二个epoch开始恢复原始学习率（仅限从头开始训练）
+            for i, param_group in enumerate(optimizer.param_groups):
+                param_group['lr'] = original_lrs[i]
+            
+            # 记录日志
+            if len(optimizer.param_groups) >= 2:
+                logger.info(f"===== 学习率恢复: 从Epoch {epoch} 开始使用原始学习率 =====")
+                logger.info(f"  主网络: {optimizer.param_groups[0]['lr']:.2e}")
+                logger.info(f"  Backbone: {optimizer.param_groups[1]['lr']:.2e}")
+            else:
+                logger.info(f"===== 学习率恢复: 从Epoch {epoch} 开始使用原始学习率 {optimizer.param_groups[0]['lr']:.2e} =====")
 
         # One full pass over the train split.
         train_metrics, train_curve_points = train_one_epoch(model, train_loader, optimizer, epoch, cfg, logger)

@@ -13,7 +13,6 @@ class Config:
 
     def __init__(self):
         # ===================== 基础路径 =====================
-        # Paths that every stage shares.
         self.ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
         self.LOG_ROOT = os.path.join(self.ROOT_DIR, "log")
         self.EXP_NAME = ""
@@ -21,19 +20,18 @@ class Config:
         self.DATA_ROOT = os.path.join(self.ROOT_DIR, "data_process", "data")
 
         # ===================== 训练配置 =====================
-        # Training/runtime behavior.
         self.TRAIN_MODE = ""
         self.RESUME_CKPT_PATH = ""
 
-        self.NUM_EPOCHS = 20
+        self.NUM_EPOCHS = 25
         self.BATCH_SIZE = 8
         self.NUM_WORKERS = 16
         self.FUTURE_STEPS = 10
         self.PREDICT_DELTA_QPOS = True
         self.DELTA_QPOS_SCALE = 10.0
 
-        self.LR = 1e-5
-        self.LR_BACKBONE = 1e-6
+        self.LR = 1e-4
+        self.LR_BACKBONE = 1e-5
         self.WEIGHT_DECAY = 1e-5
         self.KL_WEIGHT = 1
 
@@ -47,11 +45,9 @@ class Config:
         self.USE_CUDA = torch.cuda.is_available()
 
         # ===================== 策略 / 模型选择 =====================
-        # Which policy wrapper to build inside training.py.
         self.POLICY_CLASS = "ACTPolicy"
 
         # ===================== 模型参数（显式顶层定义，方便引用） =====================
-        # Vision/model settings kept at top level so checkpoints stay readable.
         self.CAMERA_NAMES = ["gemini"]
         # Current modes:
         # - IMAGE_CHANNELS=3 + USE_MEMORY_IMAGE_INPUT=False: RGB baseline
@@ -77,10 +73,6 @@ class Config:
 
         # ===================== 兼容 act/detr/main.py 参数 =====================
         # 这些参数当前训练主线未必都会直接用到，但其他模型代码里有引用或预留。
-        # Compatibility fields mirrored for the original ACT/DETR builder.
-        # Some are not consumed directly by this repo's main training path, but
-        # keeping them explicit makes old checkpoints and deploy/export code
-        # easier to load without special cases.
         self.MASKS = False
         self.LR_DROP = 200
         self.CLIP_MAX_NORM = 0.1
@@ -101,15 +93,7 @@ class Config:
         self.refresh_model_params()
 
     def refresh_model_params(self):
-        """Mirror top-level config into the dictionary consumed by ACT/DETR.
-
-        The repo edits config values in two styles:
-        - direct top-level attributes, which are convenient for humans;
-        - `MODEL_PARAMS`, which is what policy/model builders expect.
-
-        This method is the sync point between those two views and also enforces
-        the current valid visual-mode combinations.
-        """
+        """同步顶层模型配置到传给 ACT/DETR 的参数字典。"""
         self.NUM_QUERIES = self.FUTURE_STEPS
         self.CHUNK_SIZE = self.FUTURE_STEPS
         self.CKPT_DIR = self.EXP_LOG_DIR or ""
@@ -141,7 +125,6 @@ class Config:
             "predict_delta_qpos": self.PREDICT_DELTA_QPOS,
             "delta_qpos_scale": self.DELTA_QPOS_SCALE,
             # 兼容备用/扩展路径
-            # Compatibility / reserved fields used by adjacent ACT code paths.
             "masks": self.MASKS,
             "lr_drop": self.LR_DROP,
             "clip_max_norm": self.CLIP_MAX_NORM,
@@ -161,7 +144,7 @@ class Config:
         return self.MODEL_PARAMS
 
     def update_from_ckpt(self, ckpt_config):
-        """Restore recognized config fields from a saved checkpoint payload."""
+        """从 checkpoint 配置恢复可识别字段。"""
         for k, v in ckpt_config.items():
             if hasattr(self, k):
                 setattr(self, k, v)
