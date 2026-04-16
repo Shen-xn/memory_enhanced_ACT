@@ -50,7 +50,9 @@ class _BaseActInferenceWrapper(nn.Module):
 
     def _decode_actions(self, qpos_raw: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         if self.predict_delta_qpos:
-            return qpos_raw.unsqueeze(1) + actions * self.delta_qpos_scale.view(1, 1, 1)
+            step_delta = actions * self.delta_qpos_scale.view(1, 1, 1)
+            cumulative_delta = torch.cumsum(step_delta, dim=1)
+            return qpos_raw.unsqueeze(1) + cumulative_delta
         return actions * self.joint_rng.view(1, 1, -1) + self.joint_min.view(1, 1, -1)
 
     def _normalize_bgra_image(self, image: torch.Tensor) -> torch.Tensor:

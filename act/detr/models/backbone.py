@@ -102,7 +102,14 @@ class Backbone(BackboneBase):
             # RGBD models reuse RGB pretrained weights and initialize depth from
             # the average RGB filter. RGB-only models keep the original conv1.
             old_weight = backbone.conv1.weight.data
-            new_conv = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3)
+            new_conv = nn.Conv2d(
+                4,
+                64,
+                kernel_size=7,
+                stride=2,
+                padding=3,
+                bias=False,
+            )
             
             with torch.no_grad():
                 new_conv.weight.data[:, :3] = old_weight

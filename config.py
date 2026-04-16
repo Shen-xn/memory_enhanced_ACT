@@ -34,6 +34,7 @@ class Config:
         self.LR_BACKBONE = 1e-5
         self.WEIGHT_DECAY = 1e-4
         self.KL_WEIGHT = 1
+        self.ACTION_L1_WEIGHT = 1e-3
 
         self.VAL_FREQ = 1
         self.SAVE_FREQ = 5
@@ -138,6 +139,7 @@ class Config:
             "seed": self.SEED,
             "num_epochs": self.NUM_EPOCHS,
             "kl_weight": self.KL_WEIGHT,
+            "action_l1_weight": self.ACTION_L1_WEIGHT,
             "batch_size": self.BATCH_SIZE,
             "epochs": self.NUM_EPOCHS,
         }

@@ -23,6 +23,7 @@ class ACTPolicy(nn.Module):
         self.model = model # CVAE decoder
         self.optimizer = optimizer
         self.kl_weight = args_override['kl_weight']
+        self.action_l1_weight = float(args_override.get("action_l1_weight", 0.0))
         self.use_memory_image_input = bool(args_override.get("use_memory_image_input", False))
         print(f'KL Weight {self.kl_weight}')
 
@@ -100,9 +101,15 @@ class ACTPolicy(nn.Module):
             loss_dict = dict()
             all_l1 = F.l1_loss(actions, a_hat, reduction='none')
             l1 = (all_l1 * ~is_pad.unsqueeze(-1)).mean()
+            action_l1 = (torch.abs(a_hat) * ~is_pad.unsqueeze(-1)).mean()
             loss_dict['l1'] = l1
             loss_dict['kl'] = total_kld[0]
-            loss_dict['loss'] = loss_dict['l1'] + loss_dict['kl'] * self.kl_weight
+            loss_dict['action_l1'] = action_l1
+            loss_dict['loss'] = (
+                loss_dict['l1']
+                + loss_dict['kl'] * self.kl_weight
+                + loss_dict['action_l1'] * self.action_l1_weight
+            )
             return loss_dict
         else: # inference time
             a_hat, _, (_, _) = self.model(

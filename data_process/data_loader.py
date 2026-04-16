@@ -578,7 +578,11 @@ class ImitationDataset(Dataset):
                 s["curr"] = curr_raw.copy()
 
             if self.target_mode == "delta":
-                s["future"] = (future_raw - curr_raw.reshape(1, -1)) / self.delta_qpos_scale
+                step_delta = np.empty_like(future_raw)
+                step_delta[0] = future_raw[0] - curr_raw
+                if len(future_raw) > 1:
+                    step_delta[1:] = future_raw[1:] - future_raw[:-1]
+                s["future"] = step_delta / self.delta_qpos_scale
             elif self.normalize_joints:
                 s["future"] = (future_raw - jmin.reshape(1, -1)) / jrng.reshape(1, -1)
             else:

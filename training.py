@@ -292,7 +292,7 @@ def main():
             logger.info("该断点不含 RNG 状态，续训后 batch 顺序不会严格接续上次训练。")
     
     # Histories drive `training_curves.png`.
-    tracked_metric_keys = ["loss"] + (["l1", "kl"] if cfg.POLICY_CLASS == "ACTPolicy" else ["mse"])
+    tracked_metric_keys = ["loss"] + (["l1", "kl", "action_l1"] if cfg.POLICY_CLASS == "ACTPolicy" else ["mse"])
     train_metrics_history = {"x": [], **{k: [] for k in tracked_metric_keys}}
     val_metrics_history = {"x": [], **{k: [] for k in tracked_metric_keys}}
     val_obst_metrics_history = {"x": [], **{k: [] for k in tracked_metric_keys}}
