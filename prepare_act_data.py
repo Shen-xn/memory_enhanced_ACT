@@ -132,6 +132,37 @@ def discover_tasks(data_root: Path) -> list[Path]:
     return tasks
 
 
+def resolve_task_root(data_root: Path) -> Path:
+    """Accept either a direct task root or a parent directory that wraps it.
+
+    New collection dumps sometimes look like:
+    `F:/data_simple/dataset/task_xxx/...`
+    while older runs used:
+    `F:/dataset/task_xxx/...`
+    This helper keeps the CLI stable for both.
+    """
+    direct_tasks = [
+        path for path in data_root.glob("task_*") if path.is_dir() and "task_copy" not in path.name
+    ]
+    if direct_tasks:
+        return data_root
+
+    child_roots = []
+    for child in data_root.iterdir():
+        if not child.is_dir():
+            continue
+        child_tasks = [
+            path for path in child.glob("task_*") if path.is_dir() and "task_copy" not in path.name
+        ]
+        if child_tasks:
+            child_roots.append(child)
+
+    if len(child_roots) == 1:
+        print(f"[INFO] using nested task root: {child_roots[0]}")
+        return child_roots[0]
+    return data_root
+
+
 def has_raw_inputs(task_dir: Path) -> bool:
     return (task_dir / "states.csv").exists() and (task_dir / "rgb").exists() and (task_dir / "depth").exists()
 
@@ -158,6 +189,28 @@ def clean_states_csv(task_dir: Path, strict: bool = False) -> tuple[int, int]:
     clean_path = task_dir / "states_clean.csv"
     if not raw_path.exists():
         raise FileNotFoundError(f"{task_dir.name}: missing states.csv")
+
+    # Newer recorders already write a normal CSV with frame/joint columns plus
+    # timing metadata. In that case, keep only the ACT-required columns.
+    try:
+        preview_df = pd.read_csv(raw_path, nrows=5)
+    except Exception:
+        preview_df = None
+
+    if preview_df is not None and all(col in preview_df.columns for col in CSV_HEADER):
+        df = pd.read_csv(raw_path)
+        missing_cols = [col for col in CSV_HEADER if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"{task_dir.name}: states.csv missing columns: {missing_cols}")
+        clean_df = df[CSV_HEADER].copy()
+        incomplete_mask = clean_df[JOINT_COLS].isnull().any(axis=1) | clean_df["frame"].isnull()
+        incomplete_rows = int(incomplete_mask.sum())
+        if strict and incomplete_rows:
+            bad_rows = clean_df.index[incomplete_mask].tolist()[:10]
+            raise ValueError(f"{task_dir.name}: incomplete rows in states.csv at indices {bad_rows}")
+        clean_df.to_csv(clean_path, index=False)
+        print(f"[CSV] {task_dir.name}: wrote states_clean.csv rows={len(clean_df)} incomplete={incomplete_rows}")
+        return len(clean_df), incomplete_rows
 
     rows: list[list[str]] = []
     incomplete_rows = 0
@@ -437,7 +490,7 @@ def amplify_gripper_trajectories(
 
 def run_prepare(args: argparse.Namespace) -> int:
     """Run the official preprocessing pipeline in the canonical order."""
-    data_root = Path(args.data_root).resolve()
+    data_root = resolve_task_root(Path(args.data_root).resolve())
     tasks = discover_tasks(data_root)
     print(f"[INFO] data_root={data_root}")
     print(f"[INFO] found {len(tasks)} task directories")
