@@ -33,8 +33,9 @@ class Config:
         self.LR = 1e-5
         self.LR_BACKBONE = 1e-6
         self.WEIGHT_DECAY = 1e-4
-        self.KL_WEIGHT = 5
+        self.KL_WEIGHT = 1
         self.ACTION_L1_WEIGHT = 0.1
+        
         self.ENABLE_PROTOTYPE_LOSS = False
         self.PROTOTYPE_FILE = ""
         self.PROTOTYPE_LOSS_WEIGHT = 0.1
