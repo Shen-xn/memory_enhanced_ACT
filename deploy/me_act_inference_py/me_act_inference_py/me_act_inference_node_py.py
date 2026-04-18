@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
-"""Pure Python ROS2 deploy node matching the C++ me_act_inference_node."""
+"""Single-threaded discrete ACT deploy node.
+
+Design goal:
+- collect image/state observations asynchronously into queues;
+- match them using the same logic as the current data sampling path;
+- once one valid pair is found, stop collection, clear queues, run inference,
+  send cmd0 with a short duration, then immediately start the next cycle.
+"""
 
 from __future__ import annotations
 
-import os
 import random
 import sys
-import threading
+import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 import cv2
+import message_filters
 import numpy as np
 import rclpy
 from builtin_interfaces.msg import Time as TimeMsg
 from cv_bridge import CvBridge
-from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_srvs.srv import Trigger
@@ -38,6 +43,10 @@ def stamp_to_ns(stamp: TimeMsg) -> int:
     return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
 
+def now_ns() -> int:
+    return time.time_ns()
+
+
 class RunState(str, Enum):
     IDLE = "IDLE"
     INITIALIZING = "INITIALIZING"
@@ -47,37 +56,29 @@ class RunState(str, Enum):
 
 
 @dataclass
-class RawImageFrame:
-    image: np.ndarray
-    encoding: str
-    stamp_ns: int
-
-
-@dataclass
 class SyncedFrame:
     rgb_bgr: np.ndarray
     depth_raw: np.ndarray
-    rgb_encoding: str
-    depth_encoding: str
     rgb_stamp_ns: int
     depth_stamp_ns: int
     synced_stamp_ns: int
-    frame_id: int = 0
-
-
-@dataclass
-class PendingInference:
-    frame: SyncedFrame
-    state_query_started_ns: int
-    tick: int
-    generation: int
+    frame_id: int
 
 
 @dataclass
 class ServoStateSnapshot:
     qpos: list[float]
     observed: list[bool]
-    missing_ids: list[int] = field(default_factory=list)
+    state_est_stamp_ns: int
+    request_started_ns: int
+    response_received_ns: int
+    missing_ids: list[int]
+
+
+@dataclass
+class MatchedSample:
+    frame: SyncedFrame
+    servo: ServoStateSnapshot
 
 
 class MeActInferenceNodePy(Node):
@@ -85,83 +86,72 @@ class MeActInferenceNodePy(Node):
         super().__init__("me_act_inference_node_py")
         self.bridge = CvBridge()
         self._rng = random.Random()
-        self._frame_counter = 0
-        self._tick_id = 0
-        self._control_generation = 0
-        self._logged_image_info = False
         self._state = RunState.IDLE
         self._initialize_until_ns = 0
-        self._latest_frame: Optional[SyncedFrame] = None
-        self._pending_state_request: Optional[PendingInference] = None
-        self._inference_in_progress = False
-        self._last_known_qpos: list[float] = []
-        self._last_log_ns: dict[str, int] = {}
-        self._frame_lock = threading.Lock()
-        self._schedule_lock = threading.Lock()
-        self._pipeline_lock = threading.Lock()
-        self._pending_state_lock = threading.Lock()
-        self._qpos_lock = threading.Lock()
-        self._sync_lock = threading.Lock()
-        self._rgb_queue: deque[RawImageFrame] = deque()
-        self._depth_queue: deque[RawImageFrame] = deque()
+        self._frame_counter = 0
+        self._cycle_counter = 0
+        self._last_servo_poll_wall_ns = 0
+        self._active_request_started_wall_ns = 0
+        self._servo_request_in_flight = False
+        self._active_request_id: Optional[int] = None
+        self._next_request_id = 0
+        self._request_timeout_ids: set[int] = set()
+        self._collection_enabled = False
+        self._logged_first_image = False
 
         self._declare_parameters()
         self._load_parameters()
 
+        if not self.deploy_dir:
+            raise RuntimeError("Parameter deploy_dir must not be empty.")
+        if not (
+            len(self.servo_ids)
+            == len(self.init_center)
+            == len(self.physical_min)
+            == len(self.physical_max)
+            == 6
+        ):
+            raise RuntimeError("servo_ids/init_center/physical_min/physical_max must all have length 6.")
+
         self.pipeline = ActPipelinePy(self.deploy_dir, self.device)
 
-        self.control_callback_group = ReentrantCallbackGroup()
-        self.servo_client_callback_group = ReentrantCallbackGroup()
+        self.frame_queue: deque[SyncedFrame] = deque(maxlen=self.frame_queue_size)
+        self.servo_cache: deque[ServoStateSnapshot] = deque(maxlen=self.servo_cache_maxlen)
+        self._last_known_qpos = [float(v) for v in self.init_center]
 
         self.servo_command_pub = self.create_publisher(ServosPosition, self.servo_command_topic, 10)
-        self.servo_state_client = self.create_client(
-            GetBusServoState,
-            self.servo_state_service,
-            callback_group=self.servo_client_callback_group,
-        )
+        self.servo_state_client = self.create_client(GetBusServoState, self.servo_state_service)
 
-        self.rgb_sub = self.create_subscription(
-            Image,
-            self.rgb_topic,
-            self._on_rgb_image,
-            10,
-            callback_group=self.control_callback_group,
+        self.rgb_sub = message_filters.Subscriber(self, Image, self.rgb_topic)
+        self.depth_sub = message_filters.Subscriber(self, Image, self.depth_topic)
+        self.image_sync = message_filters.ApproximateTimeSynchronizer(
+            [self.rgb_sub, self.depth_sub],
+            queue_size=self.image_sync_queue_size,
+            slop=self.image_sync_slop_s,
         )
-        self.depth_sub = self.create_subscription(
-            Image,
-            self.depth_topic,
-            self._on_depth_image,
-            10,
-            callback_group=self.control_callback_group,
-        )
+        self.image_sync.registerCallback(self._on_synced_images)
 
         self.start_srv = self.create_service(Trigger, "~/start", self._handle_start)
         self.stop_srv = self.create_service(Trigger, "~/stop", self._handle_stop)
         self.estop_srv = self.create_service(Trigger, "~/emergency_stop", self._handle_estop)
         self.initialize_srv = self.create_service(Trigger, "~/initialize", self._handle_initialize)
 
-        self.control_timer = self.create_timer(
-            self.control_period_ms / 1000.0,
-            self._on_control_timer,
-            callback_group=self.control_callback_group,
-        )
+        while not self.servo_state_client.wait_for_service(timeout_sec=0.5):
+            self.get_logger().info(f"Waiting for servo state service: {self.servo_state_service}")
 
         self._state = RunState.RUNNING if self.enable_inference_on_start else RunState.IDLE
-        if self.enable_me_block and not self.pipeline.uses_memory_image_input():
-            self.get_logger().warning(
-                "enable_me_block=true, but exported ACT is a single-image model. me_block will be ignored."
-            )
-        if self.enable_me_block and self.pipeline.uses_memory_image_input() and not self.pipeline.has_me_block():
-            raise RuntimeError("enable_me_block=true, but deploy_dir does not contain me_block_inference.pt.")
+        self._collection_enabled = self._state == RunState.RUNNING
 
-        self.get_logger().info(
-            "me_act_inference_node_py ready. state=%s deploy_dir=%s enable_me_block=%s"
-            % (
-                self._state.value,
-                self.deploy_dir,
-                "true" if self.enable_me_block else "false",
-            )
-        )
+        self.get_logger().info("=" * 72)
+        self.get_logger().info("Discrete single-thread ACT deploy node ready")
+        self.get_logger().info(f"state={self._state.value}")
+        self.get_logger().info(f"servo_poll_hz={self.servo_poll_hz:.1f}")
+        self.get_logger().info(f"image_sync_queue_size={self.image_sync_queue_size}")
+        self.get_logger().info(f"image_sync_slop_s={self.image_sync_slop_s:.3f}")
+        self.get_logger().info(f"max_rgb_depth_skew_ms={self.max_rgb_depth_skew_ms}")
+        self.get_logger().info(f"max_img_state_skew_ms={self.max_img_state_skew_ms}")
+        self.get_logger().info(f"command_duration_ms={self.command_duration_ms}")
+        self.get_logger().info("=" * 72)
 
     def _declare_parameters(self) -> None:
         self.declare_parameter("deploy_dir", "")
@@ -170,18 +160,22 @@ class MeActInferenceNodePy(Node):
         self.declare_parameter("depth_topic", "/depth_cam/depth/image_raw")
         self.declare_parameter("servo_command_topic", "/ros_robot_controller/bus_servo/set_position")
         self.declare_parameter("servo_state_service", "/ros_robot_controller/bus_servo/get_state")
-        self.declare_parameter("control_period_ms", 100)
-        self.declare_parameter("command_duration_ms", 300)
+        self.declare_parameter("command_duration_ms", 20)
         self.declare_parameter("init_command_duration_ms", 1500)
-        self.declare_parameter("max_frame_age_ms", 250)
-        self.declare_parameter("max_state_image_skew_ms", 150)
-        self.declare_parameter("servo_state_timeout_ms", 5000)
-        self.declare_parameter("sync_queue_size", 10)
         self.declare_parameter("enable_inference_on_start", False)
         self.declare_parameter("enable_me_block", False)
         self.declare_parameter("validate_servo_ids", False)
         self.declare_parameter("debug_dump_dir", "")
         self.declare_parameter("debug_dump_every_n", 0)
+        self.declare_parameter("servo_poll_hz", 30.0)
+        self.declare_parameter("servo_request_timeout_ms", 200)
+        self.declare_parameter("image_sync_queue_size", 20)
+        self.declare_parameter("image_sync_slop_s", 0.03)
+        self.declare_parameter("frame_queue_size", 20)
+        self.declare_parameter("servo_cache_maxlen", 512)
+        self.declare_parameter("max_img_state_skew_ms", 25)
+        self.declare_parameter("max_rgb_depth_skew_ms", 25)
+        self.declare_parameter("loop_sleep_ms", 1)
         self.declare_parameter("servo_ids", [1, 2, 3, 4, 5, 10])
         self.declare_parameter("init_center", [500, 500, 180, 190, 500, 300])
         self.declare_parameter("init_random_range", 40)
@@ -189,514 +183,41 @@ class MeActInferenceNodePy(Node):
         self.declare_parameter("physical_max", [1000, 800, 650, 900, 950, 700])
 
     def _load_parameters(self) -> None:
-        self.deploy_dir = self.get_parameter("deploy_dir").get_parameter_value().string_value
-        self.device = self.get_parameter("device").get_parameter_value().string_value
-        self.rgb_topic = self.get_parameter("rgb_topic").get_parameter_value().string_value
-        self.depth_topic = self.get_parameter("depth_topic").get_parameter_value().string_value
-        self.servo_command_topic = self.get_parameter("servo_command_topic").get_parameter_value().string_value
-        self.servo_state_service = self.get_parameter("servo_state_service").get_parameter_value().string_value
-        self.control_period_ms = int(self.get_parameter("control_period_ms").value)
+        self.deploy_dir = str(self.get_parameter("deploy_dir").value)
+        self.device = str(self.get_parameter("device").value)
+        self.rgb_topic = str(self.get_parameter("rgb_topic").value)
+        self.depth_topic = str(self.get_parameter("depth_topic").value)
+        self.servo_command_topic = str(self.get_parameter("servo_command_topic").value)
+        self.servo_state_service = str(self.get_parameter("servo_state_service").value)
         self.command_duration_ms = int(self.get_parameter("command_duration_ms").value)
         self.init_command_duration_ms = int(self.get_parameter("init_command_duration_ms").value)
-        self.max_frame_age_ms = int(self.get_parameter("max_frame_age_ms").value)
-        self.max_state_image_skew_ms = int(self.get_parameter("max_state_image_skew_ms").value)
-        self.servo_state_timeout_ms = int(self.get_parameter("servo_state_timeout_ms").value)
-        self.sync_queue_size = int(self.get_parameter("sync_queue_size").value)
         self.enable_inference_on_start = bool(self.get_parameter("enable_inference_on_start").value)
         self.enable_me_block = bool(self.get_parameter("enable_me_block").value)
         self.validate_servo_ids = bool(self.get_parameter("validate_servo_ids").value)
-        self.debug_dump_dir = self.get_parameter("debug_dump_dir").get_parameter_value().string_value
+        self.debug_dump_dir = str(self.get_parameter("debug_dump_dir").value)
         self.debug_dump_every_n = int(self.get_parameter("debug_dump_every_n").value)
+        self.servo_poll_hz = float(self.get_parameter("servo_poll_hz").value)
+        self.servo_request_timeout_ms = int(self.get_parameter("servo_request_timeout_ms").value)
+        self.image_sync_queue_size = int(self.get_parameter("image_sync_queue_size").value)
+        self.image_sync_slop_s = float(self.get_parameter("image_sync_slop_s").value)
+        self.frame_queue_size = int(self.get_parameter("frame_queue_size").value)
+        self.servo_cache_maxlen = int(self.get_parameter("servo_cache_maxlen").value)
+        self.max_img_state_skew_ms = int(self.get_parameter("max_img_state_skew_ms").value)
+        self.max_rgb_depth_skew_ms = int(self.get_parameter("max_rgb_depth_skew_ms").value)
+        self.loop_sleep_ms = int(self.get_parameter("loop_sleep_ms").value)
         self.servo_ids = [int(v) for v in self.get_parameter("servo_ids").value]
         self.init_center = [int(v) for v in self.get_parameter("init_center").value]
         self.init_random_range = int(self.get_parameter("init_random_range").value)
         self.physical_min = [int(v) for v in self.get_parameter("physical_min").value]
         self.physical_max = [int(v) for v in self.get_parameter("physical_max").value]
 
-        if not self.deploy_dir:
-            raise RuntimeError("Parameter deploy_dir must not be empty.")
-        if not (len(self.servo_ids) == len(self.init_center) == len(self.physical_min) == len(self.physical_max) == 6):
-            raise RuntimeError("servo_ids/init_center/physical_min/physical_max must all have length 6.")
-        if self.debug_dump_every_n < 0:
-            raise RuntimeError("debug_dump_every_n must be >= 0.")
-        self._reset_last_known_qpos([float(v) for v in self.init_center])
-
-    def _join_vector(self, values) -> str:
-        return ", ".join(str(v) for v in values)
+        self.servo_poll_period_ns = int(1e9 / max(self.servo_poll_hz, 1e-6))
 
     def _now_ns(self) -> int:
         return int(self.get_clock().now().nanoseconds)
 
-    def _should_log_throttle(self, key: str, period_sec: float) -> bool:
-        now_ns = self._now_ns()
-        period_ns = int(period_sec * 1e9)
-        last_ns = self._last_log_ns.get(key, 0)
-        if now_ns - last_ns >= period_ns:
-            self._last_log_ns[key] = now_ns
-            return True
-        return False
-
-    def _on_rgb_image(self, msg: Image) -> None:
-        try:
-            image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-            frame = RawImageFrame(
-                image=image.copy(),
-                encoding=msg.encoding,
-                stamp_ns=stamp_to_ns(msg.header.stamp),
-            )
-            self._push_and_try_sync("rgb", frame)
-        except Exception as exc:  # pragma: no cover - ROS callback safety
-            if self._should_log_throttle("rgb_convert", 2.0):
-                self.get_logger().error(f"RGB conversion failed: {exc}")
-
-    def _on_depth_image(self, msg: Image) -> None:
-        try:
-            image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
-            frame = RawImageFrame(
-                image=np.array(image, copy=True),
-                encoding=msg.encoding,
-                stamp_ns=stamp_to_ns(msg.header.stamp),
-            )
-            self._push_and_try_sync("depth", frame)
-        except Exception as exc:  # pragma: no cover - ROS callback safety
-            if self._should_log_throttle("depth_convert", 2.0):
-                self.get_logger().error(f"Depth conversion failed: {exc}")
-
-    def _push_and_try_sync(self, source: str, frame: RawImageFrame) -> None:
-        with self._sync_lock:
-            if source == "rgb":
-                self._rgb_queue.append(frame)
-                while len(self._rgb_queue) > self.sync_queue_size:
-                    self._rgb_queue.popleft()
-                if not self._depth_queue:
-                    return
-                best_index = min(range(len(self._depth_queue)), key=lambda idx: abs(self._depth_queue[idx].stamp_ns - frame.stamp_ns))
-                other = self._depth_queue[best_index]
-                del self._depth_queue[best_index]
-                self._rgb_queue.pop()
-                rgb = frame
-                depth = other
-            else:
-                self._depth_queue.append(frame)
-                while len(self._depth_queue) > self.sync_queue_size:
-                    self._depth_queue.popleft()
-                if not self._rgb_queue:
-                    return
-                best_index = min(range(len(self._rgb_queue)), key=lambda idx: abs(self._rgb_queue[idx].stamp_ns - frame.stamp_ns))
-                other = self._rgb_queue[best_index]
-                del self._rgb_queue[best_index]
-                self._depth_queue.pop()
-                rgb = other
-                depth = frame
-
-        synced = SyncedFrame(
-            rgb_bgr=rgb.image,
-            depth_raw=depth.image,
-            rgb_encoding=rgb.encoding,
-            depth_encoding=depth.encoding,
-            rgb_stamp_ns=rgb.stamp_ns,
-            depth_stamp_ns=depth.stamp_ns,
-            synced_stamp_ns=max(rgb.stamp_ns, depth.stamp_ns),
-            frame_id=self._frame_counter + 1,
-        )
-        self._frame_counter = synced.frame_id
-
-        if not self._logged_image_info:
-            self._logged_image_info = True
-            depth_channels = 1 if synced.depth_raw.ndim == 2 else synced.depth_raw.shape[2]
-            self.get_logger().info(
-                "First image pair: rgb encoding=%s shape=%dx%d channels=%d | depth encoding=%s shape=%dx%d channels=%d dtype=%s"
-                % (
-                    synced.rgb_encoding,
-                    synced.rgb_bgr.shape[1],
-                    synced.rgb_bgr.shape[0],
-                    synced.rgb_bgr.shape[2],
-                    synced.depth_encoding,
-                    synced.depth_raw.shape[1],
-                    synced.depth_raw.shape[0],
-                    depth_channels,
-                    str(synced.depth_raw.dtype),
-                )
-            )
-
-        with self._frame_lock:
-            self._latest_frame = synced
-
-    def _on_control_timer(self) -> None:
-        state = self._state
-        if state in (RunState.ESTOP, RunState.IDLE, RunState.FAULT):
-            return
-
-        now_ns = self._now_ns()
-        if state == RunState.INITIALIZING:
-            if now_ns < self._get_initialize_until_ns():
-                return
-            with self._pipeline_lock:
-                self.pipeline.reset_memory()
-            self._tick_id = 0
-            self._state = RunState.RUNNING
-            self.get_logger().info("Initialization finished. Switching to RUNNING.")
-            return
-
-        if self._has_timed_out_pending_state_request(now_ns):
-            self._enter_fault("Servo states request timeout")
-            return
-        if self._has_active_control_work():
-            return
-
-        frame = self._get_latest_frame()
-        if frame is None:
-            if self._should_log_throttle("no_frame", 2.0):
-                self.get_logger().warning("No synced RGB/depth frame available yet.")
-            return
-
-        if (now_ns - frame.synced_stamp_ns) > self.max_frame_age_ms * 1_000_000:
-            if self._should_log_throttle("old_frame", 2.0):
-                self.get_logger().warning("Latest frame is too old. Skip this tick.")
-            return
-
-        if self._state != RunState.RUNNING:
-            return
-
-        generation = self._control_generation
-        self._tick_id += 1
-        tick = self._tick_id
-        state_query_started_ns = self._now_ns()
-        self._send_servo_state_request(frame, tick, generation, state_query_started_ns)
-
-    def _run_inference_with_state(
-        self,
-        pending: PendingInference,
-        servo_state: ServoStateSnapshot,
-        state_received_ns: int,
-    ) -> None:
-        if self._state != RunState.RUNNING or self._control_generation != pending.generation:
-            return
-
-        skew_ms = (state_received_ns - pending.frame.synced_stamp_ns) / 1e6
-        if abs(skew_ms) > self.max_state_image_skew_ms:
-            self.get_logger().warning(
-                f"Tick {pending.tick} skipped due to image/state skew: {skew_ms:.1f} ms"
-            )
-            return
-
-        try:
-            infer_started_ns = self._now_ns()
-            with self._pipeline_lock:
-                trajectory = self.pipeline.predict(
-                    pending.frame.rgb_bgr,
-                    pending.frame.depth_raw,
-                    servo_state.qpos,
-                    use_me_block=self.enable_me_block,
-                )
-            infer_finished_ns = self._now_ns()
-            if self._state != RunState.RUNNING or self._control_generation != pending.generation:
-                return
-            if not trajectory or len(trajectory[0]) != len(self.servo_ids):
-                self._enter_fault("ACT returned an empty trajectory or wrong action dimension.")
-                return
-
-            publish_frame_age_ms = (infer_finished_ns - pending.frame.synced_stamp_ns) / 1e6
-            if publish_frame_age_ms > self.max_frame_age_ms:
-                self.get_logger().warning(
-                    f"Tick {pending.tick} skipped because inference output is stale: "
-                    f"frame_age={publish_frame_age_ms:.1f} ms, limit={self.max_frame_age_ms} ms"
-                )
-                return
-
-            self._maybe_dump_debug_tick(pending, servo_state, trajectory[0], infer_finished_ns)
-            self._publish_servo_command(trajectory[0], self.command_duration_ms, servo_state.observed)
-
-            self.get_logger().info(
-                "tick=%d frame=%d frame_age=%.1fms state_wait=%.1fms infer=%.1fms qpos=[%s] observed=[%s] cmd0=[%s]"
-                % (
-                    pending.tick,
-                    pending.frame.frame_id,
-                    publish_frame_age_ms,
-                    (state_received_ns - pending.state_query_started_ns) / 1e6,
-                    (infer_finished_ns - infer_started_ns) / 1e6,
-                    self._join_vector(servo_state.qpos),
-                    self._join_vector(servo_state.observed),
-                    self._join_vector(trajectory[0]),
-                )
-            )
-        except Exception as exc:  # pragma: no cover - runtime safety
-            self._enter_fault(str(exc))
-
-    def _get_latest_frame(self) -> Optional[SyncedFrame]:
-        with self._frame_lock:
-            return self._latest_frame
-
-    def _get_initialize_until_ns(self) -> int:
-        with self._schedule_lock:
-            return self._initialize_until_ns
-
-    def _set_initialize_until_ns(self, value: int) -> None:
-        with self._schedule_lock:
-            self._initialize_until_ns = value
-
-    def _has_active_control_work(self) -> bool:
-        with self._pending_state_lock:
-            return self._pending_state_request is not None or self._inference_in_progress
-
-    def _has_timed_out_pending_state_request(self, now_ns: int) -> bool:
-        with self._pending_state_lock:
-            if self._pending_state_request is None:
-                return False
-            elapsed_ns = now_ns - self._pending_state_request.state_query_started_ns
-            if elapsed_ns <= self.servo_state_timeout_ms * 1_000_000:
-                return False
-            self._pending_state_request = None
-            return True
-
-    def _clear_pending_state_request(self) -> None:
-        with self._pending_state_lock:
-            self._pending_state_request = None
-            self._inference_in_progress = False
-
-    def _invalidate_control_work(self) -> None:
-        self._control_generation += 1
-        self._clear_pending_state_request()
-
-    def _begin_inference_for_response(self, tick: int, generation: int) -> bool:
-        with self._pending_state_lock:
-            if self._pending_state_request is None:
-                return False
-            if self._pending_state_request.tick != tick or self._pending_state_request.generation != generation:
-                return False
-            self._pending_state_request = None
-            self._inference_in_progress = True
-            return True
-
-    def _finish_inference_for_response(self) -> None:
-        with self._pending_state_lock:
-            self._inference_in_progress = False
-
-    def _send_servo_state_request(
-        self,
-        frame: SyncedFrame,
-        tick: int,
-        generation: int,
-        state_query_started_ns: int,
-    ) -> None:
-        if not self.servo_state_client.service_is_ready():
-            if self._should_log_throttle("service_unready", 2.0):
-                self.get_logger().warning(f"Servo state service not available: {self.servo_state_service}")
-            return
-
-        request = GetBusServoState.Request()
-        request.cmd = []
-        for servo_id in self.servo_ids:
-            cmd = GetBusServoCmd()
-            cmd.id = int(servo_id)
-            cmd.get_id = int(1 if self.validate_servo_ids else 0)
-            cmd.get_position = int(1)
-            request.cmd.append(cmd)
-
-        if self._state != RunState.RUNNING or self._control_generation != generation:
-            return
-
-        request_context = PendingInference(
-            frame=frame,
-            state_query_started_ns=state_query_started_ns,
-            tick=tick,
-            generation=generation,
-        )
-        with self._pending_state_lock:
-            self._pending_state_request = request_context
-
-        future = self.servo_state_client.call_async(request)
-        future.add_done_callback(lambda fut, ctx=request_context: self._on_servo_state_response(ctx, fut))
-
-    def _on_servo_state_response(self, request_context: PendingInference, future) -> None:
-        if not self._begin_inference_for_response(request_context.tick, request_context.generation):
-            return
-
-        state_received_ns = self._now_ns()
-        try:
-            response = future.result()
-        except Exception as exc:  # pragma: no cover - runtime safety
-            self._enter_fault(f"GetBusServoState future failed: {exc}")
-            return
-
-        if response is None or not response.state:
-            self.get_logger().warning("GetBusServoState returned no servo state. Skip this tick.")
-            self._finish_inference_for_response()
-            return
-        if not response.success:
-            self.get_logger().warning(
-                "GetBusServoState returned success=false; trying to use any partial state in the response."
-            )
-
-        servo_state = self._extract_servo_positions(response)
-        if servo_state is None:
-            self.get_logger().warning("Failed to parse any usable servo position. Skip this tick.")
-            self._finish_inference_for_response()
-            return
-
-        self._run_inference_with_state(request_context, servo_state, state_received_ns)
-        self._finish_inference_for_response()
-
-    def _extract_servo_positions(self, response) -> Optional[ServoStateSnapshot]:
-        if not response.state:
-            return None
-        if len(response.state) < len(self.servo_ids):
-            self.get_logger().warning(
-                f"Expected {len(self.servo_ids)} servo states, but got {len(response.state)}. "
-                "Missing servos will keep their previous command."
-            )
-        elif len(response.state) > len(self.servo_ids):
-            self.get_logger().warning(
-                f"Expected {len(self.servo_ids)} servo states, but got {len(response.state)}. Extra states will be ignored."
-            )
-
-        with self._qpos_lock:
-            qpos = list(self._last_known_qpos)
-        if len(qpos) != len(self.servo_ids):
-            qpos = [float(v) for v in self.init_center]
-
-        snapshot = ServoStateSnapshot(qpos=qpos, observed=[False] * len(self.servo_ids))
-        position_by_id: dict[int, float] = {}
-        ordered_positions: list[tuple[int, float]] = []
-        usable_state_count = min(len(response.state), len(self.servo_ids))
-
-        for index in range(usable_state_count):
-            bus_state = response.state[index]
-            if not bus_state.position:
-                self.get_logger().warning(
-                    f"Servo state {index} has no position field. That servo will not be commanded this tick."
-                )
-                continue
-
-            position = float(bus_state.position[-1])
-            ordered_positions.append((index, position))
-
-            if self.validate_servo_ids:
-                if not bus_state.present_id:
-                    self.get_logger().warning(
-                        f"validate_servo_ids=true, but servo state {index} has no present_id field. "
-                        "It will only be used if no IDs are returned."
-                    )
-                else:
-                    present_id = int(bus_state.present_id[-1])
-                    position_by_id[present_id] = position
-
-        observed_count = 0
-        if self.validate_servo_ids and position_by_id:
-            for index, servo_id in enumerate(self.servo_ids):
-                if servo_id not in position_by_id:
-                    snapshot.missing_ids.append(servo_id)
-                    continue
-                snapshot.qpos[index] = position_by_id[servo_id]
-                snapshot.observed[index] = True
-                observed_count += 1
-        else:
-            for index, position in ordered_positions:
-                snapshot.qpos[index] = position
-                snapshot.observed[index] = True
-                observed_count += 1
-            for index in range(usable_state_count, len(self.servo_ids)):
-                snapshot.missing_ids.append(self.servo_ids[index])
-
-        for index in range(usable_state_count):
-            if not snapshot.observed[index] and self.servo_ids[index] not in snapshot.missing_ids:
-                snapshot.missing_ids.append(self.servo_ids[index])
-
-        if observed_count == 0:
-            self.get_logger().warning("GetBusServoState response contained no usable servo positions.")
-            return None
-
-        with self._qpos_lock:
-            if len(self._last_known_qpos) != len(self.servo_ids):
-                self._last_known_qpos = list(snapshot.qpos)
-            for index, observed in enumerate(snapshot.observed):
-                if observed:
-                    self._last_known_qpos[index] = snapshot.qpos[index]
-
-        if snapshot.missing_ids:
-            self.get_logger().warning(
-                "Partial servo state: observed=%d/%d missing_ids=[%s]. Missing servos will not receive a command this tick."
-                % (observed_count, len(self.servo_ids), self._join_vector(snapshot.missing_ids))
-            )
-
-        return snapshot
-
-    def _publish_servo_command(
-        self,
-        action: list[float],
-        duration_ms: int,
-        command_mask: Optional[list[bool]] = None,
-    ) -> None:
-        msg = ServosPosition()
-        msg.duration = float(duration_ms) / 1000.0
-        msg.position = []
-
-        for index, servo_id in enumerate(self.servo_ids):
-            if command_mask is not None and (index >= len(command_mask) or not command_mask[index]):
-                continue
-            servo = ServoPosition()
-            servo.id = int(servo_id)
-            servo.position = int(self._clamp_to_physical_range(int(round(action[index])), index))
-            msg.position.append(servo)
-
-        if not msg.position:
-            self.get_logger().warning("No servo command published because no servo state was observed this tick.")
-            return
-
-        self.servo_command_pub.publish(msg)
-
-    def _reset_last_known_qpos(self, qpos: list[float]) -> None:
-        with self._qpos_lock:
-            self._last_known_qpos = list(qpos)
-
-    def _should_dump_debug_tick(self, tick: int) -> bool:
-        return bool(self.debug_dump_dir) and self.debug_dump_every_n > 0 and tick % self.debug_dump_every_n == 0
-
-    def _maybe_dump_debug_tick(
-        self,
-        pending: PendingInference,
-        servo_state: ServoStateSnapshot,
-        command: list[float],
-        infer_finished_ns: int,
-    ) -> None:
-        if not self._should_dump_debug_tick(pending.tick):
-            return
-
-        try:
-            os.makedirs(self.debug_dump_dir, exist_ok=True)
-            stem = f"tick_{pending.tick}_frame_{pending.frame.frame_id}"
-            base = Path(self.debug_dump_dir) / stem
-
-            cv2.imwrite(str(base) + "_rgb_bgr.png", pending.frame.rgb_bgr)
-            cv2.imwrite(str(base) + "_depth_raw.png", pending.frame.depth_raw)
-            four_channel = self.pipeline.build_debug_four_channel_image(pending.frame.rgb_bgr, pending.frame.depth_raw)
-            cv2.imwrite(str(base) + "_four_channel_bgra.png", four_channel)
-
-            depth_min = float(np.min(pending.frame.depth_raw))
-            depth_max = float(np.max(pending.frame.depth_raw))
-            with open(str(base) + "_meta.txt", "w", encoding="utf-8") as meta:
-                meta.write(f"tick={pending.tick}\n")
-                meta.write(f"frame={pending.frame.frame_id}\n")
-                meta.write(f"frame_age_ms={(infer_finished_ns - pending.frame.synced_stamp_ns) / 1e6}\n")
-                meta.write(f"rgb_encoding={pending.frame.rgb_encoding}\n")
-                meta.write(
-                    f"rgb_shape={pending.frame.rgb_bgr.shape[1]}x{pending.frame.rgb_bgr.shape[0]}x{pending.frame.rgb_bgr.shape[2]}\n"
-                )
-                depth_channels = 1 if pending.frame.depth_raw.ndim == 2 else pending.frame.depth_raw.shape[2]
-                meta.write(f"depth_encoding={pending.frame.depth_encoding}\n")
-                meta.write(
-                    f"depth_shape={pending.frame.depth_raw.shape[1]}x{pending.frame.depth_raw.shape[0]}x{depth_channels}\n"
-                )
-                meta.write(f"depth_type={pending.frame.depth_raw.dtype}\n")
-                meta.write(f"depth_min={depth_min}\n")
-                meta.write(f"depth_max={depth_max}\n")
-                meta.write(f"qpos=[{self._join_vector(servo_state.qpos)}]\n")
-                meta.write(f"observed=[{self._join_vector(servo_state.observed)}]\n")
-                meta.write(f"cmd0=[{self._join_vector(command)}]\n")
-
-            self.get_logger().info(f"Debug dump written: {base}")
-        except Exception as exc:  # pragma: no cover - runtime safety
-            self.get_logger().warning(f"Failed to write debug dump: {exc}")
+    def _join_vector(self, values) -> str:
+        return ", ".join(str(v) for v in values)
 
     def _clamp_to_physical_range(self, value: int, index: int) -> int:
         return max(self.physical_min[index], min(value, self.physical_max[index]))
@@ -708,17 +229,272 @@ class MeActInferenceNodePy(Node):
             pose.append(float(self._clamp_to_physical_range(candidate, index)))
         return pose
 
+    def _set_collection_enabled(self, enabled: bool) -> None:
+        self._collection_enabled = bool(enabled)
+        if not enabled:
+            self.frame_queue.clear()
+            self.servo_cache.clear()
+
+    def _on_synced_images(self, rgb_msg: Image, depth_msg: Image) -> None:
+        if not self._collection_enabled or self._state != RunState.RUNNING:
+            return
+        try:
+            rgb_bgr = self.bridge.imgmsg_to_cv2(rgb_msg, "bgr8")
+            depth_raw = self.bridge.imgmsg_to_cv2(depth_msg, "passthrough")
+        except Exception as exc:
+            self.get_logger().warning(f"Image conversion failed: {exc}")
+            return
+
+        frame = SyncedFrame(
+            rgb_bgr=np.array(rgb_bgr, copy=True),
+            depth_raw=np.array(depth_raw, copy=True),
+            rgb_stamp_ns=stamp_to_ns(rgb_msg.header.stamp),
+            depth_stamp_ns=stamp_to_ns(depth_msg.header.stamp),
+            synced_stamp_ns=max(stamp_to_ns(rgb_msg.header.stamp), stamp_to_ns(depth_msg.header.stamp)),
+            frame_id=self._frame_counter + 1,
+        )
+        self._frame_counter = frame.frame_id
+        self.frame_queue.append(frame)
+
+        if not self._logged_first_image:
+            self._logged_first_image = True
+            depth_channels = 1 if frame.depth_raw.ndim == 2 else frame.depth_raw.shape[2]
+            self.get_logger().info(
+                "First synced pair: rgb=%dx%d depth=%dx%d depth_channels=%d dtype=%s"
+                % (
+                    frame.rgb_bgr.shape[1],
+                    frame.rgb_bgr.shape[0],
+                    frame.depth_raw.shape[1],
+                    frame.depth_raw.shape[0],
+                    depth_channels,
+                    str(frame.depth_raw.dtype),
+                )
+            )
+
+    def _build_servo_request(self) -> GetBusServoState.Request:
+        request = GetBusServoState.Request()
+        request.cmd = []
+        for servo_id in self.servo_ids:
+            cmd = GetBusServoCmd()
+            cmd.id = int(servo_id)
+            cmd.get_id = int(1 if self.validate_servo_ids else 0)
+            cmd.get_position = 1
+            request.cmd.append(cmd)
+        return request
+
+    def _maybe_send_servo_request(self) -> None:
+        if not self._collection_enabled or self._state != RunState.RUNNING:
+            return
+        if self._servo_request_in_flight:
+            return
+        now_wall_ns = now_ns()
+        if now_wall_ns - self._last_servo_poll_wall_ns < self.servo_poll_period_ns:
+            return
+
+        self._last_servo_poll_wall_ns = now_wall_ns
+        self._servo_request_in_flight = True
+        request_id = self._next_request_id
+        self._next_request_id += 1
+        self._active_request_id = request_id
+        request_started_ns = now_wall_ns
+        self._active_request_started_wall_ns = request_started_ns
+        future = self.servo_state_client.call_async(self._build_servo_request())
+        future.add_done_callback(
+            lambda fut, req_id=request_id, req_started=request_started_ns: self._on_servo_response(
+                fut, req_id, req_started
+            )
+        )
+
+    def _handle_servo_request_timeout(self) -> None:
+        if not self._servo_request_in_flight or self._active_request_id is None:
+            return
+        elapsed_ms = (now_ns() - self._active_request_started_wall_ns) / 1e6
+        if elapsed_ms < self.servo_request_timeout_ms:
+            return
+        self._request_timeout_ids.add(self._active_request_id)
+        self._active_request_id = None
+        self._active_request_started_wall_ns = 0
+        self._servo_request_in_flight = False
+        self.get_logger().warning(
+            f"Servo request timeout after {elapsed_ms:.1f} ms, dropping this request and continuing."
+        )
+
+    def _extract_servo_snapshot(
+        self,
+        response,
+        request_started_ns: int,
+        response_received_ns: int,
+    ) -> Optional[ServoStateSnapshot]:
+        if response is None or not response.state:
+            return None
+
+        qpos = list(self._last_known_qpos)
+        observed = [False] * len(self.servo_ids)
+        missing_ids: list[int] = []
+        position_by_id: dict[int, float] = {}
+        ordered_positions: list[tuple[int, float]] = []
+        usable_state_count = min(len(response.state), len(self.servo_ids))
+
+        for index in range(usable_state_count):
+            bus_state = response.state[index]
+            if not bus_state.position:
+                continue
+            position = float(bus_state.position[-1])
+            ordered_positions.append((index, position))
+            if self.validate_servo_ids and getattr(bus_state, "present_id", None):
+                if bus_state.present_id:
+                    present_id = int(bus_state.present_id[-1])
+                    position_by_id[present_id] = position
+
+        if self.validate_servo_ids and position_by_id:
+            for index, servo_id in enumerate(self.servo_ids):
+                if servo_id in position_by_id:
+                    qpos[index] = position_by_id[servo_id]
+                    observed[index] = True
+                else:
+                    missing_ids.append(servo_id)
+        else:
+            for index, position in ordered_positions:
+                qpos[index] = position
+                observed[index] = True
+            for index in range(len(ordered_positions), len(self.servo_ids)):
+                missing_ids.append(self.servo_ids[index])
+
+        if not any(observed):
+            return None
+
+        self._last_known_qpos = list(qpos)
+        request_response_ns = max(response_received_ns - request_started_ns, 0)
+        state_est_stamp_ns = request_started_ns + request_response_ns // 2
+        return ServoStateSnapshot(
+            qpos=qpos,
+            observed=observed,
+            state_est_stamp_ns=state_est_stamp_ns,
+            request_started_ns=request_started_ns,
+            response_received_ns=response_received_ns,
+            missing_ids=missing_ids,
+        )
+
+    def _on_servo_response(self, future, request_id: int, request_started_ns: int) -> None:
+        response_received_ns = now_ns()
+        if request_id in self._request_timeout_ids:
+            self._request_timeout_ids.discard(request_id)
+            return
+        if request_id != self._active_request_id:
+            return
+        self._active_request_id = None
+        self._active_request_started_wall_ns = 0
+        self._servo_request_in_flight = False
+        if not self._collection_enabled or self._state != RunState.RUNNING:
+            return
+        try:
+            response = future.result()
+        except Exception as exc:
+            self.get_logger().warning(f"Servo query failed: {exc}")
+            return
+
+        snapshot = self._extract_servo_snapshot(response, request_started_ns, response_received_ns)
+        if snapshot is None:
+            return
+        self.servo_cache.append(snapshot)
+
+    def _try_match_sample(self) -> Optional[MatchedSample]:
+        if not self.frame_queue or not self.servo_cache:
+            return None
+
+        best_candidate = None
+        for frame_index, frame in enumerate(self.frame_queue):
+            rgb_depth_skew_ms = abs(frame.rgb_stamp_ns - frame.depth_stamp_ns) / 1e6
+            if rgb_depth_skew_ms > self.max_rgb_depth_skew_ms:
+                continue
+            for servo_index, servo in enumerate(self.servo_cache):
+                img_state_skew_ms = abs(servo.state_est_stamp_ns - frame.synced_stamp_ns) / 1e6
+                if img_state_skew_ms > self.max_img_state_skew_ms:
+                    continue
+                if best_candidate is None or img_state_skew_ms < best_candidate[0]:
+                    best_candidate = (img_state_skew_ms, frame_index, servo_index)
+
+        if best_candidate is None:
+            return None
+
+        _, frame_index, servo_index = best_candidate
+        frame = self.frame_queue[frame_index]
+        servo = self.servo_cache[servo_index]
+        return MatchedSample(frame=frame, servo=servo)
+
+    def _run_one_discrete_cycle(self, sample: MatchedSample) -> None:
+        self._set_collection_enabled(False)
+        cycle_started_ns = now_ns()
+        try:
+            trajectory = self.pipeline.predict(
+                sample.frame.rgb_bgr,
+                sample.frame.depth_raw,
+                sample.servo.qpos,
+                use_me_block=self.enable_me_block,
+            )
+        except Exception as exc:
+            self._state = RunState.FAULT
+            self.get_logger().error(f"Inference failed. Entering FAULT: {exc}")
+            return
+
+        if not trajectory or len(trajectory[0]) != len(self.servo_ids):
+            self._state = RunState.FAULT
+            self.get_logger().error("ACT returned empty trajectory or wrong action dimension. Entering FAULT.")
+            return
+
+        self._publish_servo_command(trajectory[0], self.command_duration_ms, sample.servo.observed)
+        self._cycle_counter += 1
+        rgb_depth_skew_ms = abs(sample.frame.rgb_stamp_ns - sample.frame.depth_stamp_ns) / 1e6
+        img_state_skew_ms = abs(sample.servo.state_est_stamp_ns - sample.frame.synced_stamp_ns) / 1e6
+        cycle_ms = (now_ns() - cycle_started_ns) / 1e6
+        self.get_logger().info(
+            "cycle=%d frame=%d rgb_depth=%.1fms img_state=%.1fms servo_rr=%.1fms infer+publish=%.1fms qpos=[%s] cmd0=[%s]"
+            % (
+                self._cycle_counter,
+                sample.frame.frame_id,
+                rgb_depth_skew_ms,
+                img_state_skew_ms,
+                (sample.servo.response_received_ns - sample.servo.request_started_ns) / 1e6,
+                cycle_ms,
+                self._join_vector(f"{v:.1f}" for v in sample.servo.qpos),
+                self._join_vector(f"{v:.1f}" for v in trajectory[0]),
+            )
+        )
+        self._set_collection_enabled(True)
+
+    def _publish_servo_command(
+        self,
+        action: list[float],
+        duration_ms: int,
+        command_mask: Optional[list[bool]] = None,
+    ) -> None:
+        msg = ServosPosition()
+        msg.duration = float(duration_ms) / 1000.0
+        msg.position = []
+        for index, servo_id in enumerate(self.servo_ids):
+            if command_mask is not None and (index >= len(command_mask) or not command_mask[index]):
+                continue
+            servo = ServoPosition()
+            servo.id = int(servo_id)
+            servo.position = int(self._clamp_to_physical_range(int(round(action[index])), index))
+            msg.position.append(servo)
+        if not msg.position:
+            self.get_logger().warning("No servo command published because no servo state was observed.")
+            return
+        self.servo_command_pub.publish(msg)
+
     def _handle_start(self, request, response):
         del request
         if self._state == RunState.FAULT:
             response.success = False
-            response.message = "Node is in FAULT state. Restart node or reinitialize after fixing the cause."
+            response.message = "Node is in FAULT state. Reinitialize or restart after fixing the cause."
             return response
         if self._state == RunState.INITIALIZING:
             response.success = False
             response.message = "Node is initializing. Wait until initialization finishes."
             return response
         self._state = RunState.RUNNING
+        self._set_collection_enabled(True)
         response.success = True
         response.message = "Inference started."
         return response
@@ -726,9 +502,7 @@ class MeActInferenceNodePy(Node):
     def _handle_stop(self, request, response):
         del request
         self._state = RunState.IDLE
-        self._invalidate_control_work()
-        with self._pipeline_lock:
-            self.pipeline.reset_memory()
+        self._set_collection_enabled(False)
         response.success = True
         response.message = "Inference stopped."
         return response
@@ -736,9 +510,7 @@ class MeActInferenceNodePy(Node):
     def _handle_estop(self, request, response):
         del request
         self._state = RunState.ESTOP
-        self._invalidate_control_work()
-        with self._pipeline_lock:
-            self.pipeline.reset_memory()
+        self._set_collection_enabled(False)
         response.success = True
         response.message = "Emergency stop activated. No more motion commands will be sent."
         self.get_logger().warning("Emergency stop activated.")
@@ -747,39 +519,60 @@ class MeActInferenceNodePy(Node):
     def _handle_initialize(self, request, response):
         del request
         try:
-            self._invalidate_control_work()
             pose = self._sample_initialization_pose()
             self._publish_servo_command(pose, self.init_command_duration_ms)
-            self._reset_last_known_qpos(pose)
-            with self._pipeline_lock:
-                self.pipeline.reset_memory()
-            self._set_initialize_until_ns(self._now_ns() + (self.init_command_duration_ms + 300) * 1_000_000)
+            self._last_known_qpos = list(pose)
+            self.pipeline.reset_memory()
+            self._initialize_until_ns = self._now_ns() + (self.init_command_duration_ms + 300) * 1_000_000
             self._state = RunState.INITIALIZING
+            self._set_collection_enabled(False)
             response.success = True
             response.message = "Initialization command sent."
             self.get_logger().info("Initialization pose sent: [%s]" % self._join_vector(pose))
-        except Exception as exc:  # pragma: no cover - runtime safety
+        except Exception as exc:
+            self._state = RunState.FAULT
+            self._set_collection_enabled(False)
             response.success = False
             response.message = str(exc)
-            self._enter_fault(str(exc))
+            self.get_logger().error(f"Initialization failed: {exc}")
         return response
 
-    def _enter_fault(self, reason: str) -> None:
-        self._state = RunState.FAULT
-        self._invalidate_control_work()
-        with self._pipeline_lock:
-            self.pipeline.reset_memory()
-        self.get_logger().error(f"Entering FAULT state: {reason}")
+    def run(self) -> None:
+        while rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.001)
+
+            if self._state in (RunState.IDLE, RunState.ESTOP, RunState.FAULT):
+                if self.loop_sleep_ms > 0:
+                    time.sleep(self.loop_sleep_ms / 1000.0)
+                continue
+
+            if self._state == RunState.INITIALIZING:
+                if self._now_ns() >= self._initialize_until_ns:
+                    self.pipeline.reset_memory()
+                    self._state = RunState.RUNNING
+                    self._set_collection_enabled(True)
+                    self.get_logger().info("Initialization finished. Switching to RUNNING.")
+                if self.loop_sleep_ms > 0:
+                    time.sleep(self.loop_sleep_ms / 1000.0)
+                continue
+
+            self._handle_servo_request_timeout()
+            self._maybe_send_servo_request()
+            sample = self._try_match_sample()
+            if sample is not None:
+                self._run_one_discrete_cycle(sample)
+
+            if self.loop_sleep_ms > 0:
+                time.sleep(self.loop_sleep_ms / 1000.0)
 
 
 def main(args=None) -> None:
     rclpy.init(args=args)
+    node = MeActInferenceNodePy()
     try:
-        node = MeActInferenceNodePy()
-        executor = MultiThreadedExecutor()
-        executor.add_node(node)
-        executor.spin()
+        node.run()
     finally:
+        node.destroy_node()
         rclpy.shutdown()
 
 

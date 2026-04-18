@@ -24,7 +24,7 @@ class Config:
         self.RESUME_CKPT_PATH = ""
 
         self.NUM_EPOCHS = 40
-        self.BATCH_SIZE = 8
+        self.BATCH_SIZE = 16
         self.NUM_WORKERS = 8
         self.FUTURE_STEPS = 10
         self.PREDICT_DELTA_QPOS = True
@@ -35,7 +35,7 @@ class Config:
         self.WEIGHT_DECAY = 1e-4
         self.KL_WEIGHT = 1
         self.ACTION_L1_WEIGHT = 0.1
-        
+
         self.ENABLE_PROTOTYPE_LOSS = False
         self.PROTOTYPE_FILE = ""
         self.PROTOTYPE_LOSS_WEIGHT = 0.1
