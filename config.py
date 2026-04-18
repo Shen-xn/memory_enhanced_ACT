@@ -24,17 +24,17 @@ class Config:
         self.RESUME_CKPT_PATH = ""
 
         self.NUM_EPOCHS = 40
-        self.BATCH_SIZE = 32
+        self.BATCH_SIZE = 8
         self.NUM_WORKERS = 8
         self.FUTURE_STEPS = 10
         self.PREDICT_DELTA_QPOS = True
         self.DELTA_QPOS_SCALE = 10.0
 
-        self.LR = 2e-5
-        self.LR_BACKBONE = 2e-6
+        self.LR = 1e-5
+        self.LR_BACKBONE = 1e-6
         self.WEIGHT_DECAY = 1e-4
-        self.KL_WEIGHT = 2
-        self.ACTION_L1_WEIGHT = 1e-4
+        self.KL_WEIGHT = 5
+        self.ACTION_L1_WEIGHT = 0.1
 
         self.VAL_FREQ = 1
         self.SAVE_FREQ = 5
@@ -62,11 +62,11 @@ class Config:
         self.DILATION = False
         self.PRE_NORM = True
 
-        self.ENC_LAYERS_ENC = 4
+        self.ENC_LAYERS_ENC = 5
         self.ENC_LAYERS = 4
-        self.DEC_LAYERS = 4
+        self.DEC_LAYERS = 6
         self.DROPOUT = 0.1
-        self.DIM_FEEDFORWARD = 1024
+        self.DIM_FEEDFORWARD = 2048
         self.HIDDEN_DIM = 512
         self.NHEADS = 8
         self.NUM_QUERIES = self.FUTURE_STEPS

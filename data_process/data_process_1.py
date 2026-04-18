@@ -18,7 +18,7 @@ from scipy.signal import savgol_filter
 from tqdm import tqdm
 
 
-DISTANCE_THRESHOLD = 20
+DISTANCE_THRESHOLD = 10
 DEPTH_CLIP_MIN = 0
 DEPTH_CLIP_MAX = 800
 WINDOW_SIZE = 10
@@ -342,7 +342,7 @@ def process_single_task(task_dir):
             f"after bad-row cleanup: kept={after_bad_rows} removed={raw_rows - after_bad_rows} "
             f"ratio={(raw_rows - after_bad_rows) / max(raw_rows, 1):.2%}"
         )
-    df = smooth_trajectory(df)
+    # df = smooth_trajectory(df)
     df_filtered = filter_trajectory(df)
 
     original_frames = df_filtered["original_frame"].tolist()
