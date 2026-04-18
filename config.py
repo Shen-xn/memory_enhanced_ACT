@@ -62,9 +62,9 @@ class Config:
         self.DILATION = False
         self.PRE_NORM = True
 
-        self.ENC_LAYERS_ENC = 5
-        self.ENC_LAYERS = 4
-        self.DEC_LAYERS = 6
+        self.ENC_LAYERS_ENC = 3
+        self.ENC_LAYERS = 5
+        self.DEC_LAYERS = 5
         self.DROPOUT = 0.1
         self.DIM_FEEDFORWARD = 2048
         self.HIDDEN_DIM = 512
