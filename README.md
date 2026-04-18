@@ -1,97 +1,15 @@
 # memory_enhanced_ACT
 
-## ACT Visual Modes
+当前主线已经收敛为一条方法：
 
-Quick clarification for current code behavior:
+- 单图 ACT 输入：`four_channel/` 的 BGRA 四通道图
+- `phase token` 只进主 transformer 的 encoder
+- `phase token` 不给主 decoder
+- `prototype` 分支预测全关节动作模板混合比例
+- `residual` 分支预测全关节残差动作
+- 最终动作：`prototype_mix + residual`
 
-- `baseline ACT` is not a single fixed mode anymore. It includes:
-  - `RGB baseline`: `USE_MEMORY_IMAGE_INPUT=False`, `IMAGE_CHANNELS=3`
-  - `RGBD baseline`: `USE_MEMORY_IMAGE_INPUT=False`, `IMAGE_CHANNELS=4`
-- `RGBD + memory` is `USE_MEMORY_IMAGE_INPUT=True`, `IMAGE_CHANNELS=4`
-- Disk data and ROS/deploy entrypoints still stay unified as `four_channel` / `BGRA`
-- RGB baseline does not require rebuilding data; the loader and deploy wrapper just ignore the depth channel
-- The current default in [`config.py`](./config.py) is `IMAGE_CHANNELS=4`, so running `python training.py` with defaults trains `RGBD baseline`, not `RGB baseline`
-
-当前 ACT 主线支持三种视觉模式，尽量共用同一套 dataloader、backbone、policy 和部署 wrapper：
-
-- RGB baseline: `USE_MEMORY_IMAGE_INPUT=False`, `IMAGE_CHANNELS=3`
-- RGBD baseline: `USE_MEMORY_IMAGE_INPUT=False`, `IMAGE_CHANNELS=4`
-- RGBD + memory: `USE_MEMORY_IMAGE_INPUT=True`, `IMAGE_CHANNELS=4`
-
-磁盘数据和 ROS 部署入口仍统一使用 `four_channel` / BGRA。RGB baseline 不需要重做数据，只是在 dataloader 和 TorchScript wrapper 里忽略 depth 通道。旧 checkpoint 如果没有 `IMAGE_CHANNELS` 字段，会继续按 `DEPTH_CHANNEL` 恢复，默认保持旧的 4 通道行为。
-
-这个仓库现在按两条主线来理解最清楚：
-
-1. ACT 主训练
-   - `USE_MEMORY_IMAGE_INPUT = False`：baseline，单张四通道图输入
-   - `USE_MEMORY_IMAGE_INPUT = True`：双图 ACT，输入 `image + memory_image`
-2. `me_block` 离线 pipeline
-   - 标注重要区域
-   - 训练 importance segmentation
-   - 生成 `memory_image_four_channel`
-   - 再把记忆图喂给双图 ACT
-
-当前不做在线联合训练。`me_block` 是离线子系统，ACT 只负责吃单图或双图输入。
-
-## 快速开始
-
-检查 CUDA：
-
-```powershell
-python cuda_test/torch_cuda.py
-```
-
-训练 baseline ACT：
-
-```powershell
-python training.py
-```
-
-跑完整离线记忆图流程：
-
-```powershell
-python run_me_block_label_annotator.py
-python run_me_block_train_importance.py
-python run_me_block_generate_memory_images.py --checkpoint .\log\me_block\importance_xxx\best_model.pth
-python training.py
-```
-
-## 环境安装
-
-推荐 Python 版本：
-
-- `Python 3.10 - 3.13`
-- Ubuntu 22.04 / ROS 2 Humble 一般对应 `Python 3.10`
-
-先按设备类型安装 `torch` / `torchvision`，再安装项目依赖：
-
-```bash
-pip install -r requirements.txt
-```
-
-`requirements.txt` 里没有强绑 `torch`，是因为桌面 CUDA、CPU 和 Jetson 的安装方式不一样。
-
-如果是 Jetson / `aarch64`：
-
-- 优先安装 Jetson 兼容的 `torch` / `torchvision`
-- `opencv` 不建议走 pip，优先：
-
-```bash
-sudo apt update
-sudo apt install -y python3-opencv
-```
-
-普通 Windows / x86_64 Linux 再使用 `pip install -r requirements.txt` 即可。
-
-## 目录
-
-- `training.py`：ACT 训练入口
-- `config.py`：主训练配置
-- `data_process/`：数据预处理和 dataloader
-- `act/`：ACT / DETR 主体
-- `act/detr/models/me_block/`：`me_block` 离线实现
-- `deploy/`：TorchScript 导出和 Jetson / ROS2 部署代码
-- `log/`：训练日志和模型
+旧的 `me_block / memory_image / 简单 prototype 分类损失` 已经从工程主线移除。
 
 ## 数据约定
 
@@ -107,252 +25,99 @@ data_process/data/
 task_xxx/
   four_channel/
   states_filtered.csv
+  phase_proto_targets.npz
 ```
 
-如果训练双图 ACT，还会额外读取：
+其中：
 
-```text
-task_xxx/
-  memory_image_four_channel/
-```
+- `four_channel/*.png` 是 OpenCV 口径的 `BGRA`
+- `states_filtered.csv` 至少包含：
+  - `frame`
+  - `j1 j2 j3 j4 j5 j10`
+- `phase_proto_targets.npz` 是离线预计算好的监督：
+  - `frame_index`
+  - `alpha_tgt`
+  - `prototype_tgt`
+  - `residual_tgt`
 
-`states_filtered.csv` 至少包含这 6 列：
+## 训练前离线准备
 
-- `j1`
-- `j2`
-- `j3`
-- `j4`
-- `j5`
-- `j10`
-
-推荐同时保留 `frame` 列，并让它和 `four_channel/*.png` 的数字文件名一致。训练 dataloader 会按 `frame` 和图片文件名做严格对齐，不再用“截断到较短长度”的方式凑齐数据。
-
-正式训练前推荐只运行根目录的一键入口：
+先生成 phase prototype bank 和每个任务的 `alpha_tgt / residual_tgt`：
 
 ```powershell
-python prepare_act_data.py
+python tools/build_phase_prototype_targets.py `
+  --data-root F:\预处理后的新数据 `
+  --bank-output .\data_process\data\_phase_proto\phase_proto_bank.npz `
+  --clusters 16 `
+  --pca-var-ratio 0.85 `
+  --future-steps 10 `
+  --target-mode delta `
+  --delta-qpos-scale 10
 ```
 
-它会按固定顺序清洗 `states.csv`、同步 `rgb/depth/states_clean.csv`、重建 `four_channel/`、把夹爪 `j10` 的动态围绕全数据集均值放大到 1.2 倍并限制在物理边界内，最后验证 `states_filtered.csv` 和 `four_channel/*.png` 严格对齐。已有的生成式 `task_obst_*` 这类 final-only 任务不会被重做，但会参与夹爪放大和最终验证。
+生成完成后：
 
-夹爪放大会先保存每个任务的 `states_filtered.pre_gripper_amp.csv`，之后反复运行脚本都会从这个备份重新生成 `states_filtered.csv`，不会叠加放大。
+- bank 会写到你指定的 `--bank-output`
+- 每个 `task_xxx/` 下会写出一个 `phase_proto_targets.npz`
 
-如果某条轨迹越出固定物理边界，预处理会打印警告并写入 `data_process/data/excluded_tasks.json`。ACT dataloader、ME-block 数据集和遮挡任务生成都会读取这份清单并跳过这些任务。
+然后把 [`config.py`](./config.py) 里的：
 
-双图 ACT 训练时，`memory_image_four_channel` 缺失不会中断训练，dataloader 会打印警告并用全零 memory 图补齐。这用于允许部分任务没有离线 memory 图，但正式实验前建议确认警告数量。
+- `DATA_ROOT`
+- `PHASE_BANK_PATH`
 
-训练/验证按任务目录划分，不是按帧随机划分。
-训练集和验证集严格分开；如果任务数量不足导致任一 split 为空，训练会直接报错。
+对到你实际路径。
 
-## 当前统一口径
-
-### 图像通道
-
-- 四通道图在磁盘和部署侧都按 OpenCV 语义处理，也就是 `BGRA`
-- ACT 训练 dataloader 现在也统一按 `BGRA` 读图
-- ACT 在归一化前会把颜色通道重排成 `RGB` 语义后再套 ImageNet mean/std
-- `me_block` 训练、生成和部署都继续按 OpenCV 口径处理 `BGR/BGRA`
-
-换句话说：训练、导出、部署现在都以 `BGRA` 作为外部接口，不再混用 PIL 的 `RGBA` 读图口径。
-
-### 关节归一化
-
-ACT 训练、导出、部署统一使用固定物理范围，不再按数据集统计：
-
-```text
-joint_min = [0, 100, 50, 50, 50, 150]
-joint_max = [1000, 800, 650, 900, 950, 700]
-joint_rng = [1000, 700, 600, 850, 900, 550]
-```
-
-## ACT 训练
-
-Mode selection summary:
-
-- `USE_MEMORY_IMAGE_INPUT = False` + `IMAGE_CHANNELS = 3`: RGB baseline
-- `USE_MEMORY_IMAGE_INPUT = False` + `IMAGE_CHANNELS = 4`: RGBD baseline
-- `USE_MEMORY_IMAGE_INPUT = True` + `IMAGE_CHANNELS = 4`: RGBD + memory
-
-If you simply run `python training.py` with the current default config, you are training the RGBD baseline.
-
-主训练开关在 [`config.py`](./config.py)：
-
-- `USE_MEMORY_IMAGE_INPUT = False`：baseline 单图 ACT
-- `USE_MEMORY_IMAGE_INPUT = True`：双图 ACT
-
-运行：
+## 训练
 
 ```powershell
 python training.py
 ```
 
-新实验默认写到：
+日志会写到：
 
 ```text
 log/exp_YYYYMMDD_HHMMSS/
 ```
 
-常见输出：
+主要输出：
 
 - `config.json`
 - `metrics.jsonl`
+- `training_curves.png`
 - `ckpt_epoch_X.pth`
 - `best_model.pth`
-- `training_curves.png`
 
-断点续训：
+## 当前损失
 
-```python
-TRAIN_MODE = "resume"
-RESUME_CKPT_PATH = "你的 checkpoint 路径"
-```
+训练时主损失是：
 
-然后再运行 `python training.py`。
+- `recon_l1`
+- `residual_l1`
+- `prototype_mse`
+- `kl`
 
-## 你后面在正式机器上的推荐顺序
+总损失在 [`act/policy.py`](./act/policy.py) 里加权求和。
 
-### 路线 A：baseline ACT
+## 导出与部署
 
-This route applies to both RGB baseline and RGBD baseline.
+当前 deploy 只保留 baseline 单图 ACT 路径。
 
-Before training, set:
-
-- `USE_MEMORY_IMAGE_INPUT = False`
-- `IMAGE_CHANNELS = 3` for RGB baseline
-- `IMAGE_CHANNELS = 4` for RGBD baseline
-
-The export command and `me_act_baseline.launch.py` are shared by both baseline variants. The actual channel count is read from `deploy_config.yml -> image_channels`.
-
-适用场景：
-
-- 先做最稳的部署基线
-- 不使用 `me_block`
-
-步骤：
-
-1. 准备正式数据集
-   - 每个任务目录至少有 `four_channel/` 和 `states_filtered.csv`
-2. 在 [`config.py`](./config.py) 里确认：
-   - `USE_MEMORY_IMAGE_INPUT = False`
-   - `DATA_ROOT` 指向正式数据集
-3. 训练：
+导出：
 
 ```powershell
-python training.py
+python deploy/export_torchscript_models.py `
+  --act-checkpoint .\log\exp_xxx\best_model.pth `
+  --output-dir .\deploy_artifacts_baseline `
+  --smoke-test
 ```
 
-4. 导出：
+导出目录包含：
 
-```powershell
-python deploy/export_torchscript_models.py --act-checkpoint .\log\exp_xxx\best_model.pth --output-dir .\deploy_artifacts_baseline --smoke-test
-```
+- `act_inference.pt`
+- `deploy_config.yml`
 
-5. Jetson / ROS2 启动 baseline：
-
-```bash
-ros2 launch me_act_inference me_act_baseline.launch.py
-```
-
-### 路线 B：me_act（`me_block` + 双图 ACT）
-
-适用场景：
-
-- 想测试在线 `me_block -> ACT`
-- 最终部署 me_act
-
-步骤：
-
-1. 先准备给 `me_block` 用的数据
-   - 标注/训练 importance 用 `rgb/`
-   - 生成记忆图和在线部署都用 `four_channel/`
-2. 标注：
-
-```powershell
-python run_me_block_label_annotator.py
-```
-
-3. 训练 `me_block`：
-
-```powershell
-python run_me_block_train_importance.py
-```
-
-4. 如果你想先验证离线记忆图质量，先生成一遍：
-
-```powershell
-python run_me_block_generate_memory_images.py --checkpoint .\log\me_block\importance_xxx\best_model.pth --debug
-```
-
-5. 训练双图 ACT
-   - 在 [`config.py`](./config.py) 里确认 `USE_MEMORY_IMAGE_INPUT = True`
-   - 再运行：
-
-```powershell
-python training.py
-```
-
-6. 导出 me_act：
-
-```powershell
-python deploy/export_torchscript_models.py --act-checkpoint .\log\exp_xxx\best_model.pth --me-block-checkpoint .\log\me_block\importance_xxx\best_model.pth --output-dir .\deploy_artifacts_memory --smoke-test
-```
-
-7. Jetson / ROS2 启动 memory 版：
-
-```bash
-ros2 launch me_act_inference me_act_memory.launch.py
-```
-
-## 正式训练前的检查清单
-
-- 这次训练出来的 ACT 必须和当前代码口径一致，旧 ACT checkpoint 不建议继续沿用
-- 正式训练前先运行 `python prepare_act_data.py`，不要手动跳步骤
-- `states_filtered.csv` 的 `frame` 列应和 `four_channel/*.png` 文件名一致
-- `four_channel` 统一按 OpenCV `BGRA` 口径处理
-- 关节归一化统一按固定物理范围，不再按数据集统计
-- 夹爪 `j10` 在预处理中统一按全数据集均值做 1.2 倍动态放大，并裁剪到物理范围
-- 越出物理边界的任务会进入 `excluded_tasks.json`，训练和 ME-block 相关流程会自动跳过
-- 如果双图 ACT 训练时出现 memory 图缺失警告，要确认这是有意使用全零 memory 补齐
-- baseline 导出时不要带 `--me-block-checkpoint`
-- 双图 ACT 导出时必须带 `--me-block-checkpoint`
-- ROS2 launch 里的 `deploy_dir` 要改成目标机器真实路径
-- 真机前先在导出机上跑一遍 `--smoke-test`
-
-## `me_block` 离线流程
-
-详细说明看 [`act/detr/models/me_block/README.md`](./act/detr/models/me_block/README.md)。
-
-这里记住结论就够：
-
-1. `run_me_block_label_annotator.py`
-2. `run_me_block_train_importance.py`
-3. `run_me_block_generate_memory_images.py --checkpoint ...`
-4. 打开 `USE_MEMORY_IMAGE_INPUT = True` 再训练 ACT
-
-## 部署
-
-部署说明看：
-
-- [`deploy/README.md`](./deploy/README.md)
-- [`deploy/me_act_inference/README.md`](./deploy/me_act_inference/README.md)
-
-当前已经打通的是 baseline ACT 部署链：
+部署侧仍然是：
 
 ```text
-rgb + depth + qpos -> preprocess(BGRA) -> ACT -> action sequence
+rgb + depth + qpos -> BGRA four-channel -> ACT -> action sequence
 ```
-
-如果部署的是双图 ACT，也支持：
-
-```text
-rgb + depth + qpos -> preprocess(BGRA) -> me_block -> memory_image -> ACT -> action sequence
-```
-
-ROS2 节点支持：
-
-- 初始化
-- 开始
-- 停止
-- 急停
-
-当前不做时间聚合，先执行 `action_seq[0]`。

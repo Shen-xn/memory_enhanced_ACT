@@ -138,7 +138,6 @@ def generate_launch_description():
                         "max_rgb_depth_skew_ms": ParameterValue(LaunchConfiguration("max_rgb_depth_skew_ms"), value_type=int),
                         "loop_sleep_ms": ParameterValue(LaunchConfiguration("loop_sleep_ms"), value_type=int),
                         "enable_inference_on_start": ParameterValue(LaunchConfiguration("enable_inference_on_start"), value_type=bool),
-                        "enable_me_block": False,
                         "validate_servo_ids": ParameterValue(LaunchConfiguration("validate_servo_ids"), value_type=bool),
                         "debug_dump_dir": LaunchConfiguration("debug_dump_dir"),
                         "debug_dump_every_n": ParameterValue(LaunchConfiguration("debug_dump_every_n"), value_type=int),

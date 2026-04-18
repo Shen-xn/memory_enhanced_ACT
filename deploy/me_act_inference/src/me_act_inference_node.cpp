@@ -117,18 +117,11 @@ class MeActInferenceNode : public rclcpp::Node {
         control_callback_group_);
 
     state_.store(enable_inference_on_start_ ? RunState::RUNNING : RunState::IDLE);
-    if (enable_me_block_ && !pipeline_->UsesMemoryImageInput()) {
-      RCLCPP_WARN(get_logger(), "enable_me_block=true, but exported ACT is a single-image model. me_block will be ignored.");
-    }
-    if (enable_me_block_ && pipeline_->UsesMemoryImageInput() && !pipeline_->HasMeBlock()) {
-      throw std::runtime_error("enable_me_block=true, but deploy_dir does not contain me_block_inference.pt.");
-    }
     RCLCPP_INFO(
         get_logger(),
-        "me_act_inference_node ready. state=%s deploy_dir=%s enable_me_block=%s",
+        "me_act_inference_node ready. state=%s deploy_dir=%s",
         ToString(state_.load()).c_str(),
-        deploy_dir_.c_str(),
-        enable_me_block_ ? "true" : "false");
+        deploy_dir_.c_str());
   }
 
  private:
@@ -178,7 +171,6 @@ class MeActInferenceNode : public rclcpp::Node {
     declare_parameter<int>("servo_state_timeout_ms", 5000);
     declare_parameter<int>("sync_queue_size", 10);
     declare_parameter<bool>("enable_inference_on_start", false);
-    declare_parameter<bool>("enable_me_block", false);
     declare_parameter<bool>("validate_servo_ids", false);
     declare_parameter<std::string>("debug_dump_dir", "");
     declare_parameter<int>("debug_dump_every_n", 0);
@@ -204,7 +196,6 @@ class MeActInferenceNode : public rclcpp::Node {
     servo_state_timeout_ms_ = get_parameter("servo_state_timeout_ms").as_int();
     sync_queue_size_ = get_parameter("sync_queue_size").as_int();
     enable_inference_on_start_ = get_parameter("enable_inference_on_start").as_bool();
-    enable_me_block_ = get_parameter("enable_me_block").as_bool();
     validate_servo_ids_ = get_parameter("validate_servo_ids").as_bool();
     debug_dump_dir_ = get_parameter("debug_dump_dir").as_string();
     debug_dump_every_n_ = get_parameter("debug_dump_every_n").as_int();
@@ -360,7 +351,7 @@ class MeActInferenceNode : public rclcpp::Node {
       {
         // Protect online memory state from concurrent reset services.
         std::lock_guard<std::mutex> lock(pipeline_mutex_);
-        trajectory = pipeline_->Predict(pending.frame.rgb_bgr, pending.frame.depth_raw, servo_state.qpos, enable_me_block_);
+        trajectory = pipeline_->Predict(pending.frame.rgb_bgr, pending.frame.depth_raw, servo_state.qpos);
       }
       const auto infer_finished = get_clock()->now();
       if (state_.load() != RunState::RUNNING || control_generation_.load() != pending.generation) {
@@ -852,7 +843,6 @@ class MeActInferenceNode : public rclcpp::Node {
   int servo_state_timeout_ms_ = 500;
   int sync_queue_size_ = 10;
   bool enable_inference_on_start_ = false;
-  bool enable_me_block_ = false;
   bool validate_servo_ids_ = false;
   std::string debug_dump_dir_;
   int debug_dump_every_n_ = 0;
@@ -870,7 +860,7 @@ class MeActInferenceNode : public rclcpp::Node {
 
   std::mutex frame_mutex_;
   std::mutex schedule_mutex_;
-  // Guards ActPipeline because it owns mutable recurrent me_block state.
+  // Guards ActPipeline during concurrent inference and reset service calls.
   std::mutex pipeline_mutex_;
   std::mutex pending_state_mutex_;
   std::mutex qpos_mutex_;

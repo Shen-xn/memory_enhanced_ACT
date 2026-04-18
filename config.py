@@ -5,21 +5,15 @@ import torch
 
 
 class Config:
-    """Single source of truth for ACT training configuration.
-
-    Top-level fields are kept explicit so checkpoint configs remain readable.
-    `refresh_model_params()` mirrors the subset needed by the DETR/ACT builder.
-    """
+    """Single source of truth for training and export configuration."""
 
     def __init__(self):
-        # ===================== 基础路径 =====================
         self.ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
         self.LOG_ROOT = os.path.join(self.ROOT_DIR, "log")
+        self.DATA_ROOT = os.path.join(self.ROOT_DIR, "data_process", "data")
         self.EXP_NAME = ""
         self.EXP_LOG_DIR = ""
-        self.DATA_ROOT = os.path.join(self.ROOT_DIR, "data_process", "data")
 
-        # ===================== 训练配置 =====================
         self.TRAIN_MODE = ""
         self.RESUME_CKPT_PATH = ""
 
@@ -33,14 +27,11 @@ class Config:
         self.LR = 1e-5
         self.LR_BACKBONE = 1e-6
         self.WEIGHT_DECAY = 1e-4
-        self.KL_WEIGHT = 1
-        self.ACTION_L1_WEIGHT = 0.1
+        self.KL_WEIGHT = 1.0
 
-        self.ENABLE_PROTOTYPE_LOSS = False
-        self.PROTOTYPE_FILE = ""
         self.PROTOTYPE_LOSS_WEIGHT = 0.1
-        self.PROTOTYPE_TEMPERATURE = 1.0
-        self.PROTOTYPE_NUM_CLUSTERS = 32
+        self.RESIDUAL_LOSS_WEIGHT = 1.0
+        self.RECON_LOSS_WEIGHT = 1.0
 
         self.VAL_FREQ = 1
         self.SAVE_FREQ = 5
@@ -50,17 +41,9 @@ class Config:
 
         self.SEED = 1
         self.USE_CUDA = torch.cuda.is_available()
-
-        # ===================== 策略 / 模型选择 =====================
         self.POLICY_CLASS = "ACTPolicy"
 
-        # ===================== 模型参数（显式顶层定义，方便引用） =====================
         self.CAMERA_NAMES = ["gemini"]
-        # Current modes:
-        # - IMAGE_CHANNELS=3 + USE_MEMORY_IMAGE_INPUT=False: RGB baseline
-        # - IMAGE_CHANNELS=4 + USE_MEMORY_IMAGE_INPUT=False: RGBD baseline
-        # - IMAGE_CHANNELS=4 + USE_MEMORY_IMAGE_INPUT=True: RGBD + memory image
-        self.USE_MEMORY_IMAGE_INPUT = False
         self.IMAGE_CHANNELS = 4
         self.DEPTH_CHANNEL = True
         self.BACKBONE = "resnet18"
@@ -78,8 +61,15 @@ class Config:
         self.NUM_QUERIES = self.FUTURE_STEPS
         self.STATE_DIM = 6
 
-        # ===================== 兼容 act/detr/main.py 参数 =====================
-        # 这些参数当前训练主线未必都会直接用到，但其他模型代码里有引用或预留。
+        self.USE_PHASE_TOKEN = True
+        self.PHASE_TARGETS_FILENAME = "phase_proto_targets.npz"
+        self.PHASE_BANK_PATH = os.path.join(
+            self.DATA_ROOT, "_phase_proto", "phase_proto_bank.npz"
+        )
+        self.PHASE_NUM_PROTOTYPES = 16
+        self.PHASE_PCA_DIM = 0
+        self.PHASE_PCA_VAR_RATIO = 0.85
+
         self.MASKS = False
         self.LR_DROP = 200
         self.CLIP_MAX_NORM = 0.1
@@ -94,27 +84,22 @@ class Config:
         self.refresh_model_params()
 
     def start_new_experiment(self):
-        """Create a fresh experiment name/path for a new training run."""
         if not self.EXP_NAME:
             self.EXP_NAME = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.EXP_LOG_DIR = os.path.join(self.LOG_ROOT, self.EXP_NAME)
         self.refresh_model_params()
 
     def refresh_model_params(self):
-        """同步顶层模型配置到传给 ACT/DETR 的参数字典。"""
         self.NUM_QUERIES = self.FUTURE_STEPS
         self.CHUNK_SIZE = self.FUTURE_STEPS
         self.CKPT_DIR = self.EXP_LOG_DIR or ""
-        self.IMAGE_CHANNELS = int(getattr(self, "IMAGE_CHANNELS", 4))
+        self.IMAGE_CHANNELS = int(self.IMAGE_CHANNELS)
         if self.IMAGE_CHANNELS not in (3, 4):
             raise ValueError(f"IMAGE_CHANNELS must be 3 or 4, got {self.IMAGE_CHANNELS}")
-        if self.USE_MEMORY_IMAGE_INPUT and self.IMAGE_CHANNELS != 4:
-            raise ValueError("USE_MEMORY_IMAGE_INPUT=True currently requires IMAGE_CHANNELS=4.")
         self.DEPTH_CHANNEL = self.IMAGE_CHANNELS == 4
 
         self.MODEL_PARAMS = {
             "camera_names": self.CAMERA_NAMES,
-            "use_memory_image_input": self.USE_MEMORY_IMAGE_INPUT,
             "image_channels": self.IMAGE_CHANNELS,
             "depth_channel": self.DEPTH_CHANNEL,
             "backbone": self.BACKBONE,
@@ -132,7 +117,11 @@ class Config:
             "state_dim": self.STATE_DIM,
             "predict_delta_qpos": self.PREDICT_DELTA_QPOS,
             "delta_qpos_scale": self.DELTA_QPOS_SCALE,
-            # 兼容备用/扩展路径
+            "use_phase_token": self.USE_PHASE_TOKEN,
+            "phase_bank_path": self.PHASE_BANK_PATH,
+            "phase_num_prototypes": self.PHASE_NUM_PROTOTYPES,
+            "phase_pca_dim": self.PHASE_PCA_DIM,
+            "phase_pca_var_ratio": self.PHASE_PCA_VAR_RATIO,
             "masks": self.MASKS,
             "lr_drop": self.LR_DROP,
             "clip_max_norm": self.CLIP_MAX_NORM,
@@ -146,33 +135,26 @@ class Config:
             "seed": self.SEED,
             "num_epochs": self.NUM_EPOCHS,
             "kl_weight": self.KL_WEIGHT,
-            "action_l1_weight": self.ACTION_L1_WEIGHT,
-            "enable_prototype_loss": self.ENABLE_PROTOTYPE_LOSS,
-            "prototype_file": self.PROTOTYPE_FILE,
             "prototype_loss_weight": self.PROTOTYPE_LOSS_WEIGHT,
-            "prototype_temperature": self.PROTOTYPE_TEMPERATURE,
-            "prototype_num_clusters": self.PROTOTYPE_NUM_CLUSTERS,
+            "residual_loss_weight": self.RESIDUAL_LOSS_WEIGHT,
+            "recon_loss_weight": self.RECON_LOSS_WEIGHT,
             "batch_size": self.BATCH_SIZE,
             "epochs": self.NUM_EPOCHS,
         }
         return self.MODEL_PARAMS
 
     def update_from_ckpt(self, ckpt_config):
-        """从 checkpoint 配置恢复可识别字段。"""
-        for k, v in ckpt_config.items():
-            if hasattr(self, k):
-                setattr(self, k, v)
+        for key, value in ckpt_config.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
 
-        # Older checkpoints may only know DEPTH_CHANNEL. Some intermediate
-        # exports may only carry the mirrored MODEL_PARAMS value.
         model_params = ckpt_config.get("MODEL_PARAMS") or {}
-        if "IMAGE_CHANNELS" not in ckpt_config:
-            if "image_channels" in model_params:
-                self.IMAGE_CHANNELS = int(model_params["image_channels"])
-            elif "DEPTH_CHANNEL" in ckpt_config:
-                self.IMAGE_CHANNELS = 4 if bool(ckpt_config["DEPTH_CHANNEL"]) else 3
-            elif "depth_channel" in model_params:
-                self.IMAGE_CHANNELS = 4 if bool(model_params["depth_channel"]) else 3
+        if "IMAGE_CHANNELS" not in ckpt_config and "image_channels" in model_params:
+            self.IMAGE_CHANNELS = int(model_params["image_channels"])
+        if "PHASE_NUM_PROTOTYPES" not in ckpt_config and "phase_num_prototypes" in model_params:
+            self.PHASE_NUM_PROTOTYPES = int(model_params["phase_num_prototypes"])
+        if "PHASE_PCA_DIM" not in ckpt_config and "phase_pca_dim" in model_params:
+            self.PHASE_PCA_DIM = int(model_params["phase_pca_dim"])
         self.refresh_model_params()
 
 

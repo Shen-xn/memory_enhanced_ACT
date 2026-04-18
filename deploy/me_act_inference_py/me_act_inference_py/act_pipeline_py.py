@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Python deployment pipeline mirroring the C++ ActPipeline behavior."""
+"""Python deployment pipeline for baseline ACT inference."""
 
 from __future__ import annotations
 
@@ -23,111 +23,45 @@ class DeployConfig:
     state_dim: int = 6
     num_queries: int = 10
     image_channels: int = 4
-    use_memory_image_input: bool = False
-    has_me_block: bool = False
-    me_block_num_classes: int = 3
 
 
 class ActPipelinePy:
-    """TorchScript deployment path matching the C++ pipeline contract."""
-
     def __init__(self, deploy_dir: str, device: str = "cpu") -> None:
         self.deploy_dir = Path(deploy_dir)
         self.config = self._load_config(self.deploy_dir / "deploy_config.yml")
         self.device = self._parse_device(device)
         self.act_module = torch.jit.load(str(self.deploy_dir / "act_inference.pt"), map_location=self.device).eval()
-        self.me_block_module = None
-        self.me_block_loaded = False
 
-        me_block_path = self.deploy_dir / "me_block_inference.pt"
-        if self.config.has_me_block and me_block_path.exists():
-            self.me_block_module = torch.jit.load(str(me_block_path), map_location=self.device).eval()
-            self.me_block_loaded = True
+    def reset_memory(self) -> None:
+        return None
 
-        self.prev_memory: torch.Tensor | None = None
-        self.prev_scores: torch.Tensor | None = None
-        self.reset_memory()
-
-    def uses_memory_image_input(self) -> bool:
-        return self.config.use_memory_image_input
-
-    def has_me_block(self) -> bool:
-        return self.me_block_loaded
-
-    def predict(
-        self,
-        bgr: np.ndarray,
-        depth: np.ndarray,
-        qpos: List[float],
-        use_me_block: bool = True,
-    ) -> List[List[float]]:
+    def predict(self, bgr: np.ndarray, depth: np.ndarray, qpos: List[float]) -> List[List[float]]:
         four_channel = self.build_four_channel_image(bgr, depth, self.config)
-        return self.predict_from_four_channel(four_channel, qpos, use_me_block=use_me_block)
+        return self.predict_from_four_channel(four_channel, qpos)
 
-    def predict_from_four_channel(
-        self,
-        four_channel_bgra: np.ndarray,
-        qpos: List[float],
-        use_me_block: bool = True,
-    ) -> List[List[float]]:
+    def predict_from_four_channel(self, four_channel_bgra: np.ndarray, qpos: List[float]) -> List[List[float]]:
         if four_channel_bgra is None or four_channel_bgra.size == 0 or four_channel_bgra.ndim != 3 or four_channel_bgra.shape[2] != 4:
             raise ValueError("PredictFromFourChannel expects a non-empty BGRA image.")
-
         image_tensor = self._mat_to_tensor(four_channel_bgra)
         qpos_tensor = self._qpos_to_tensor(qpos)
-        memory_tensor = torch.zeros_like(image_tensor)
-
-        if self.config.use_memory_image_input:
-            self._ensure_memory_state()
-            self.prev_memory = self.prev_memory.to(self.device)
-            self.prev_scores = self.prev_scores.to(self.device)
-            if use_me_block and self.me_block_loaded:
-                outputs = self.me_block_module(image_tensor, self.prev_memory, self.prev_scores)
-                memory_tensor = outputs[0].to(self.device)
-                self.prev_memory = outputs[1].to(self.device)
-                self.prev_scores = outputs[2].to(self.device)
-            elif use_me_block:
-                raise RuntimeError("me_block was requested, but me_block_inference.pt is not loaded.")
-            else:
-                self.reset_memory()
-
         with torch.no_grad():
-            if self.config.use_memory_image_input:
-                actions = self.act_module(qpos_tensor, image_tensor, memory_tensor)
-            else:
-                actions = self.act_module(qpos_tensor, image_tensor)
-
+            actions = self.act_module(qpos_tensor, image_tensor)
         return self._tensor_to_trajectory(actions.squeeze(0).to("cpu"))
 
     def build_debug_four_channel_image(self, bgr: np.ndarray, depth: np.ndarray) -> np.ndarray:
         return self.build_four_channel_image(bgr, depth, self.config)
-
-    def reset_memory(self) -> None:
-        self.prev_memory = torch.zeros(
-            (1, self.config.me_block_num_classes, 4, self.config.target_height, self.config.target_width),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        self.prev_scores = torch.zeros(
-            (1, self.config.me_block_num_classes, self.config.target_height, self.config.target_width),
-            dtype=torch.float32,
-            device=self.device,
-        )
 
     @staticmethod
     def _load_config(path: Path) -> DeployConfig:
         fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_READ)
         if not fs.isOpened():
             raise RuntimeError(f"Failed to open deploy config: {path}")
-
         cfg = DeployConfig()
 
         def read_value(key: str, default):
             node = fs.getNode(key)
             if node.empty():
                 return default
-            if isinstance(default, bool):
-                return bool(int(node.real()))
             if isinstance(default, int):
                 return int(node.real())
             return float(node.real())
@@ -141,9 +75,6 @@ class ActPipelinePy:
         cfg.state_dim = read_value("state_dim", cfg.state_dim)
         cfg.num_queries = read_value("num_queries", cfg.num_queries)
         cfg.image_channels = read_value("image_channels", cfg.image_channels)
-        cfg.use_memory_image_input = read_value("use_memory_image_input", cfg.use_memory_image_input)
-        cfg.has_me_block = read_value("has_me_block", cfg.has_me_block)
-        cfg.me_block_num_classes = read_value("me_block_num_classes", cfg.me_block_num_classes)
         fs.release()
         return cfg
 
@@ -151,10 +82,7 @@ class ActPipelinePy:
     def _parse_device(device: str) -> torch.device:
         if device == "cuda":
             if not torch.cuda.is_available():
-                raise RuntimeError(
-                    "ROS parameter device='cuda' was requested, but PyTorch reports CUDA is not available. "
-                    "Install a CUDA-enabled PyTorch build on Jetson or set device='cpu'."
-                )
+                raise RuntimeError("device='cuda' was requested, but CUDA is not available.")
             return torch.device("cuda")
         return torch.device("cpu")
 
@@ -162,7 +90,6 @@ class ActPipelinePy:
     def normalize_depth(depth: np.ndarray, clip_min: float, clip_max: float) -> np.ndarray:
         if depth is None or depth.size == 0 or depth.ndim != 2:
             raise ValueError("Depth image must be non-empty and single-channel.")
-
         depth_f32 = depth.astype(np.float32, copy=False)
         depth_f32 = np.clip(depth_f32, clip_min, clip_max)
         depth_f32 = (depth_f32 - clip_min) * (255.0 / (clip_max - clip_min))
@@ -178,15 +105,9 @@ class ActPipelinePy:
             if depth.shape[2] != 1:
                 raise ValueError("Depth image must be single-channel.")
             depth = depth[:, :, 0]
-
-        bgr_resized = cv2.resize(
-            bgr,
-            (config.target_width, config.target_height),
-            interpolation=cv2.INTER_LINEAR,
-        )
+        bgr_resized = cv2.resize(bgr, (config.target_width, config.target_height), interpolation=cv2.INTER_LINEAR)
         depth_u8 = ActPipelinePy.normalize_depth(depth, config.depth_clip_min, config.depth_clip_max)
         depth_aligned = np.zeros((config.target_height, config.target_width), dtype=np.uint8)
-
         copy_w = min(depth_u8.shape[1], config.target_width - config.pad_left)
         copy_h = min(depth_u8.shape[0], config.target_height - config.pad_top)
         if copy_w > 0 and copy_h > 0:
@@ -194,10 +115,8 @@ class ActPipelinePy:
                 config.pad_top : config.pad_top + copy_h,
                 config.pad_left : config.pad_left + copy_w,
             ] = depth_u8[:copy_h, :copy_w]
-
         channels = cv2.split(bgr_resized)
-        four_channel = cv2.merge([channels[0], channels[1], channels[2], depth_aligned])
-        return four_channel
+        return cv2.merge([channels[0], channels[1], channels[2], depth_aligned])
 
     def _mat_to_tensor(self, image: np.ndarray) -> torch.Tensor:
         if not image.flags["C_CONTIGUOUS"]:
@@ -213,9 +132,4 @@ class ActPipelinePy:
 
     @staticmethod
     def _tensor_to_trajectory(tensor: torch.Tensor) -> List[List[float]]:
-        cpu = tensor.contiguous()
-        return cpu.tolist()
-
-    def _ensure_memory_state(self) -> None:
-        if self.prev_memory is None or self.prev_scores is None:
-            self.reset_memory()
+        return tensor.contiguous().tolist()

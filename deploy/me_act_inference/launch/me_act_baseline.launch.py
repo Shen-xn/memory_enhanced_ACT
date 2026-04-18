@@ -49,7 +49,6 @@ def generate_launch_description():
                         "servo_state_timeout_ms": 500,
                         "sync_queue_size": 10,
                         "enable_inference_on_start": False,
-                        "enable_me_block": False,
                         "validate_servo_ids": ParameterValue(LaunchConfiguration("validate_servo_ids"), value_type=bool),
                         "debug_dump_dir": LaunchConfiguration("debug_dump_dir"),
                         "debug_dump_every_n": ParameterValue(LaunchConfiguration("debug_dump_every_n"), value_type=int),

@@ -148,8 +148,31 @@ def plot_training_curves(train_metrics, val_metrics, val_obst_metrics, save_path
 
     # Bottom panel: policy-specific detail metrics.
     ax2 = axes[1]
-    if "l1" in train_metrics:
-        # ACTPolicy
+    if "recon_l1" in train_metrics:
+        _plot_metric_series(ax2, train_x, train_metrics.get("recon_l1", []), label="Train Recon L1", color="green", linewidth=1.8)
+        _plot_metric_series(ax2, val_x, val_metrics.get("recon_l1", []), label="Val (Normal) Recon L1", color="purple", linewidth=2.2, marker="o")
+        _plot_metric_series(ax2, val_obst_x, val_obst_metrics.get("recon_l1", []), label="Val (Obstacle) Recon L1", color="brown", linewidth=2.2, marker="o")
+        _plot_metric_series(ax2, train_x, train_metrics.get("residual_l1", []), label="Train Residual L1", color="orange", linewidth=1.8, linestyle="--")
+        _plot_metric_series(ax2, val_x, val_metrics.get("residual_l1", []), label="Val (Normal) Residual L1", color="red", linewidth=2.0, linestyle="--", marker="o")
+        _plot_metric_series(ax2, val_obst_x, val_obst_metrics.get("residual_l1", []), label="Val (Obstacle) Residual L1", color="black", linewidth=2.0, linestyle="--", marker="o")
+
+        ax2_twin = ax2.twinx()
+        _plot_metric_series(ax2_twin, train_x, train_metrics.get("prototype_mse", []), label="Train Prototype MSE", color="cyan", linewidth=1.8)
+        _plot_metric_series(ax2_twin, val_x, val_metrics.get("prototype_mse", []), label="Val (Normal) Prototype MSE", color="magenta", linewidth=2.0, marker="o")
+        _plot_metric_series(ax2_twin, val_obst_x, val_obst_metrics.get("prototype_mse", []), label="Val (Obstacle) Prototype MSE", color="gray", linewidth=2.0, marker="o")
+        _plot_metric_series(ax2_twin, train_x, train_metrics.get("kl", []), label="Train KL", color="blue", linewidth=1.6, linestyle=":")
+        _plot_metric_series(ax2_twin, val_x, val_metrics.get("kl", []), label="Val (Normal) KL", color="pink", linewidth=1.8, linestyle=":", marker="o")
+        _plot_metric_series(ax2_twin, val_obst_x, val_obst_metrics.get("kl", []), label="Val (Obstacle) KL", color="olive", linewidth=1.8, linestyle=":", marker="o")
+
+        ax2.set_xlabel("Epoch Progress")
+        ax2.set_ylabel("Action Loss")
+        ax2_twin.set_ylabel("Prototype / KL")
+        lines1, labels1 = ax2.get_legend_handles_labels()
+        lines2, labels2 = ax2_twin.get_legend_handles_labels()
+        ax2.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
+        ax2.grid(True)
+    elif "l1" in train_metrics:
+        # Legacy ACTPolicy history
         _plot_metric_series(ax2, train_x, train_metrics.get("l1", []), label="Train L1 Loss", color="green", linewidth=1.8)
         _plot_metric_series(ax2, val_x, val_metrics.get("l1", []), label="Val (Normal) L1 Loss", color="purple", linewidth=2.2, marker="o")
         _plot_metric_series(ax2, val_obst_x, val_obst_metrics.get("l1", []), label="Val (Obstacle) L1 Loss", color="brown", linewidth=2.2, marker="o")
@@ -162,7 +185,6 @@ def plot_training_curves(train_metrics, val_metrics, val_obst_metrics, save_path
         ax2.set_xlabel("Epoch Progress")
         ax2.set_ylabel("L1 Loss")
         ax2_twin.set_ylabel("KL Loss")
-        # Merge legends from the left and right y-axes.
         lines1, labels1 = ax2.get_legend_handles_labels()
         lines2, labels2 = ax2_twin.get_legend_handles_labels()
         ax2.legend(lines1 + lines2, labels1 + labels2, loc="upper right")

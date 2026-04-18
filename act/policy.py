@@ -1,48 +1,30 @@
-"""Policy wrappers around the ACT/DETR model builders.
+"""Policy wrappers around the ACT/DETR model builders."""
 
-The wrappers normalize external image tensors before calling the model and
-compute training losses. Deployment wrappers must mirror the same image and
-qpos normalization rules.
-"""
+from __future__ import annotations
 
-import torch.nn as nn
 import torch
-from torch.nn import functional as F
+import torch.nn as nn
 import torchvision.transforms as transforms
+from torch.nn import functional as F
 
 from act.detr.main import build_ACT_model_and_optimizer, build_CNNMLP_model_and_optimizer
-from act.prototype_loss import ActionPrototypeBank
-# import IPython
-# e = IPython.embed
+
 
 class ACTPolicy(nn.Module):
-    """Main CVAE ACT policy used by this project."""
+    """Main CVAE ACT policy with phase-token prototype-residual supervision."""
 
     def __init__(self, args_override, device=None):
         super().__init__()
         model, optimizer = build_ACT_model_and_optimizer(args_override, device=device)
-        self.model = model # CVAE decoder
+        self.model = model
         self.optimizer = optimizer
-        self.kl_weight = args_override['kl_weight']
-        self.action_l1_weight = float(args_override.get("action_l1_weight", 0.0))
-        self.enable_prototype_loss = bool(args_override.get("enable_prototype_loss", False))
-        self.prototype_loss_weight = float(args_override.get("prototype_loss_weight", 0.0))
-        self.use_memory_image_input = bool(args_override.get("use_memory_image_input", False))
-        self.prototype_bank = None
-        prototype_file = str(args_override.get("prototype_file", "") or "").strip()
-        if self.enable_prototype_loss:
-            if not prototype_file:
-                raise ValueError("Prototype loss is enabled but prototype_file is empty.")
-            self.prototype_bank = ActionPrototypeBank.from_npz(
-                prototype_file,
-                temperature=float(args_override.get("prototype_temperature", 1.0)),
-            )
-            if device is not None:
-                self.prototype_bank = self.prototype_bank.to(device)
-        print(f'KL Weight {self.kl_weight}')
+        self.kl_weight = float(args_override["kl_weight"])
+        self.prototype_loss_weight = float(args_override.get("prototype_loss_weight", 0.1))
+        self.residual_loss_weight = float(args_override.get("residual_loss_weight", 1.0))
+        self.recon_loss_weight = float(args_override.get("recon_loss_weight", 1.0))
+        print(f"KL Weight {self.kl_weight}")
 
     def _normalize_tensor(self, image):
-        """Convert OpenCV BGR/BGRA tensors to RGB/RGBD and apply ImageNet stats."""
         channel_count = image.shape[-3]
         if channel_count == 4:
             if image.dim() == 4:
@@ -67,93 +49,71 @@ class ACTPolicy(nn.Module):
         return normalize(image)
 
     def _prepare_image_input(self, image):
-        """
-        Accept either:
-        - [B, C, H, W] for a single camera
-        - [B, N, C, H, W] for multi-camera input
-        and normalize to the 5D format expected by the DETR backbone path.
-        """
         expected_cameras = len(getattr(self.model, "camera_names", []))
-
         if image.dim() == 4:
             if expected_cameras not in (0, 1):
                 raise ValueError(
-                    f"Expected {expected_cameras} camera views, but got a single-image tensor "
-                    f"with shape {tuple(image.shape)}."
+                    f"Expected {expected_cameras} camera views, but got single-image tensor {tuple(image.shape)}."
                 )
             return image.unsqueeze(1)
-
         if image.dim() != 5:
-            raise ValueError(
-                f"Expected image shape [B, C, H, W] or [B, N, C, H, W], got {tuple(image.shape)}."
-            )
-
+            raise ValueError(f"Expected [B,C,H,W] or [B,N,C,H,W], got {tuple(image.shape)}.")
         if expected_cameras and image.size(1) != expected_cameras:
-            raise ValueError(
-                f"Expected {expected_cameras} camera views, but got tensor shape {tuple(image.shape)}."
-            )
-
+            raise ValueError(f"Expected {expected_cameras} camera views, got {tuple(image.shape)}.")
         return image
 
-    def __call__(self, qpos, image, memory_image=None, actions=None, is_pad=None):
-        """Return a loss dict during training or action chunks during inference."""
+    def __call__(
+        self,
+        qpos,
+        image,
+        alpha_targets=None,
+        residual_targets=None,
+        actions=None,
+        is_pad=None,
+    ):
         env_state = None
         image = self._normalize_tensor(image)
         image = self._prepare_image_input(image)
-        
-        if self.use_memory_image_input and memory_image is not None:
-            memory_image = self._normalize_tensor(memory_image)
-        else:
-            memory_image = None
-        
-        if actions is not None: # training time
-            actions = actions[:, :self.model.num_queries]
-            is_pad = is_pad[:, :self.model.num_queries]
 
-            a_hat, is_pad_hat, (mu, logvar) = self.model(qpos, image, env_state, memory_image, actions, is_pad)
-            total_kld, dim_wise_kld, mean_kld = kl_divergence(mu, logvar)
-            loss_dict = dict()
-            all_l1 = F.l1_loss(actions, a_hat, reduction='none')
-            l1 = (all_l1 * ~is_pad.unsqueeze(-1)).mean()
-            action_l1 = (torch.abs(a_hat) * ~is_pad.unsqueeze(-1)).mean()
-            loss_dict['l1'] = l1
-            loss_dict['kl'] = total_kld[0]
-            loss_dict['action_l1'] = action_l1
-            if self.prototype_bank is not None:
-                proto_loss, proto_acc = self.prototype_bank.classification_loss(a_hat, actions)
-                loss_dict['prototype_loss'] = proto_loss
-                loss_dict['prototype_acc'] = proto_acc
-            else:
-                zero = a_hat.new_zeros(())
-                loss_dict['prototype_loss'] = zero
-                loss_dict['prototype_acc'] = zero
-            loss_dict['loss'] = (
-                loss_dict['l1']
-                + loss_dict['kl'] * self.kl_weight
-                + loss_dict['action_l1'] * self.action_l1_weight
-                + loss_dict['prototype_loss'] * self.prototype_loss_weight
+        if actions is not None:
+            actions = actions[:, : self.model.num_queries]
+            is_pad = is_pad[:, : self.model.num_queries]
+            action_hat, is_pad_hat, (mu, logvar), aux = self.model(
+                qpos, image, env_state, actions=actions, is_pad=is_pad
+            )
+            total_kld, _, _ = kl_divergence(mu, logvar)
+            valid_mask = (~is_pad).unsqueeze(-1)
+
+            recon_l1 = (F.l1_loss(actions, action_hat, reduction="none") * valid_mask).mean()
+            residual_l1 = (F.l1_loss(aux["residual_action"], residual_targets, reduction="none") * valid_mask).mean()
+            prototype_mse = F.mse_loss(aux["prototype_alpha"], alpha_targets)
+
+            loss_dict = {
+                "recon_l1": recon_l1,
+                "residual_l1": residual_l1,
+                "prototype_mse": prototype_mse,
+                "kl": total_kld[0],
+            }
+            loss_dict["loss"] = (
+                loss_dict["recon_l1"] * self.recon_loss_weight
+                + loss_dict["residual_l1"] * self.residual_loss_weight
+                + loss_dict["prototype_mse"] * self.prototype_loss_weight
+                + loss_dict["kl"] * self.kl_weight
             )
             return loss_dict
-        else: # inference time
-            a_hat, _, (_, _) = self.model(
-                qpos,
-                image,
-                env_state,
-                memory_image=memory_image,
-            )
-            return a_hat
+
+        action_hat, _, (_, _), _ = self.model(qpos, image, env_state)
+        return action_hat
 
     def configure_optimizers(self):
         return self.optimizer
 
 
 class CNNMLPPolicy(nn.Module):
-    """Legacy policy kept only for old ACT compatibility paths."""
-
     def __init__(self, args_override, device=None):
         super().__init__()
         model, optimizer = build_CNNMLP_model_and_optimizer(args_override, device=device)
-        self.model = model # decoder
+        self.model = model
         self.optimizer = optimizer
 
     def _normalize_tensor(self, image):
@@ -182,45 +142,32 @@ class CNNMLPPolicy(nn.Module):
 
     def _prepare_image_input(self, image):
         expected_cameras = len(getattr(self.model, "camera_names", []))
-
         if image.dim() == 4:
             if expected_cameras not in (0, 1):
                 raise ValueError(
-                    f"Expected {expected_cameras} camera views, but got a single-image tensor "
-                    f"with shape {tuple(image.shape)}."
+                    f"Expected {expected_cameras} camera views, but got single-image tensor {tuple(image.shape)}."
                 )
             return image.unsqueeze(1)
-
         if image.dim() != 5:
-            raise ValueError(
-                f"Expected image shape [B, C, H, W] or [B, N, C, H, W], got {tuple(image.shape)}."
-            )
-
+            raise ValueError(f"Expected [B,C,H,W] or [B,N,C,H,W], got {tuple(image.shape)}.")
         if expected_cameras and image.size(1) != expected_cameras:
-            raise ValueError(
-                f"Expected {expected_cameras} camera views, but got tensor shape {tuple(image.shape)}."
-            )
-
+            raise ValueError(f"Expected {expected_cameras} camera views, got {tuple(image.shape)}.")
         return image
 
     def __call__(self, qpos, image, actions=None, is_pad=None):
-        env_state = None # TODO
+        env_state = None
         image = self._normalize_tensor(image)
         image = self._prepare_image_input(image)
-        if actions is not None: # training time
+        if actions is not None:
             actions = actions[:, 0]
             a_hat = self.model(qpos, image, env_state, actions)
             mse = F.mse_loss(actions, a_hat)
-            loss_dict = dict()
-            loss_dict['mse'] = mse
-            loss_dict['loss'] = loss_dict['mse']
-            return loss_dict
-        else: # inference time
-            a_hat = self.model(qpos, image, env_state) # no action, sample from prior
-            return a_hat
+            return {"mse": mse, "loss": mse}
+        return self.model(qpos, image, env_state)
 
     def configure_optimizers(self):
         return self.optimizer
+
 
 def kl_divergence(mu, logvar):
     batch_size = mu.size(0)
@@ -234,5 +181,4 @@ def kl_divergence(mu, logvar):
     total_kld = klds.sum(1).mean(0, True)
     dimension_wise_kld = klds.mean(0)
     mean_kld = klds.mean(1).mean(0, True)
-
     return total_kld, dimension_wise_kld, mean_kld

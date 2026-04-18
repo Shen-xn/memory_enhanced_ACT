@@ -1,126 +1,57 @@
 # Deploy
 
-## Visual Modes
+The deploy path now keeps only the baseline single-image ACT export.
 
-Current baseline terminology:
-
-- `baseline` includes two single-image ACT variants
-- `image_channels=3`: RGB baseline
-- `image_channels=4` with `use_memory_image_input=false`: RGBD baseline
-- `image_channels=4` with `use_memory_image_input=true`: RGBD + memory
-
-Both baseline variants use the same `deploy_artifacts_baseline` structure and the same baseline ROS launch. The exported `deploy_config.yml` decides whether the wrapper feeds 3 or 4 channels into ACT.
-
-导出的 ACT artifact 会记录 `image_channels`：
-
-- `image_channels=3`: RGB baseline。部署侧仍接收 BGRA 图像，但 TorchScript wrapper 只取 RGB 三通道喂给 ACT。
-- `image_channels=4`: RGBD baseline 或 RGBD+memory。TorchScript wrapper 取 RGBD 四通道。
-
-ROS2 节点和 C++ preprocessing 仍统一构造 BGRA，这样 RGB、RGBD、RGBD+memory 三种模型共用同一套相机同步和预处理逻辑。不要为了 RGB baseline 另改 ROS 输入路径。
-
-`deploy/` 负责两件事：
-
-1. 导出 TorchScript
-2. 提供 Jetson / ROS2 运行包
-
-## 当前部署口径
-
-- 外部四通道接口统一为 `BGRA`
-- ACT 和 `me_block` 都以 `BGRA` 作为部署输入
-- 关节归一化统一使用固定物理范围：
+Inference path:
 
 ```text
-joint_min = [0, 100, 50, 50, 50, 150]
-joint_max = [1000, 800, 650, 900, 950, 700]
-joint_rng = [1000, 700, 600, 850, 900, 550]
+rgb + depth + qpos -> preprocess(BGRA) -> act_inference.pt -> action sequence
 ```
 
-## 导出 TorchScript
+Removed from deploy:
 
-### baseline ACT
+- `me_block`
+- `memory_image`
+- legacy dual-image ACT deploy variants
 
-This section applies to both RGB baseline and RGBD baseline.
+## Export
 
 ```powershell
 python deploy/export_torchscript_models.py `
   --act-checkpoint .\log\exp_xxx\best_model.pth `
-  --output-dir deploy_artifacts_baseline `
+  --output-dir .\deploy_artifacts_baseline `
   --smoke-test
 ```
 
-产物：
+Exported files:
 
 - `act_inference.pt`
 - `deploy_config.yml`
 
-### me_act（双图 ACT + `me_block`）
+## deploy_config.yml
 
-```powershell
-python deploy/export_torchscript_models.py `
-  --act-checkpoint .\log\exp_xxx\best_model.pth `
-  --me-block-checkpoint .\log\me_block\importance_xxx\best_model.pth `
-  --output-dir .\deploy_artifacts_memory `
-  --smoke-test
-```
+The exported config now only stores baseline preprocessing and decoding fields:
 
-产物：
+- `target_width`
+- `target_height`
+- `pad_left`
+- `pad_top`
+- `depth_clip_min`
+- `depth_clip_max`
+- `state_dim`
+- `num_queries`
+- `image_channels`
+- `predict_delta_qpos`
+- `delta_qpos_scale`
 
-- `act_inference.pt`
-- `me_block_inference.pt`
-- `deploy_config.yml`
+## TorchScript wrapper
 
-## 导出约束
+Wrapper implementation:
 
-- baseline 单图 ACT 不能带 `--me-block-checkpoint`
-- 双图 ACT 必须带 `--me-block-checkpoint`
-- 双图 ACT 的 checkpoint 必须是 `USE_MEMORY_IMAGE_INPUT = True` 训练出来的
-- 当前部署链里，双图 ACT 的 `memory_image` 由在线 `me_block` 生成，不再额外读取离线 PNG
-- `--smoke-test` 会按导出的 `me_block_num_classes` 创建 memory state，不再假定只有固定 3 个前景类
+- [deploy_wrappers.py](./deploy_wrappers.py)
 
-## 换到正式训练机后怎么做
+Responsibilities:
 
-### baseline
-
-1. 训练 baseline ACT
-2. 导出到 `deploy_artifacts_baseline`
-3. 拷到 Jetson
-4. 启动 `me_act_baseline.launch.py`
-
-### me_act
-
-1. 训练 `me_block`
-2. 训练双图 ACT
-3. 导出到 `deploy_artifacts_memory`
-4. 拷到 Jetson
-5. 启动 `me_act_memory.launch.py`
-
-## 拷到 Jetson 的内容
-
-模型目录单独放，例如：
-
-```text
-/home/ubuntu/my_models/me_act/deploy_artifacts_baseline
-/home/ubuntu/my_models/me_act/deploy_artifacts_memory
-```
-
-ROS2 包放进工作区：
-
-```text
-deploy/me_act_inference/
-```
-
-详细启动方式看：
-
-- [`deploy/me_act_inference/README.md`](./me_act_inference/README.md)
-
-## 部署前检查清单
-
-- 在导出机上先跑 `--smoke-test`
-- Jetson 上 launch 文件里的 `deploy_dir` 指向真实路径
-- baseline 和 memory 版不要混用目录
-- 如果打开了 `enable_me_block`，导出目录里必须真的有 `me_block_inference.pt`
-- ROS2 节点的 `initialize/stop/emergency_stop` 会重置在线 memory state；节点内部已经对推理和重置加锁，避免服务回调和控制 tick 并发改同一份 memory
- 
-## 数据回放校验
-
-`deploy/me_act_inference` 里新增 `me_act_replay_node`，可从任务目录回放 `rgb/depth_normalized` 并按 `states_filtered.csv` 下发舵机位置，用于验证数据是否正确。
+- normalize raw `qpos`
+- convert BGRA images into model input tensor order
+- decode model output actions back to physical joint space

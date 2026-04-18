@@ -163,7 +163,6 @@ class MeActInferenceNodePy(Node):
         self.declare_parameter("command_duration_ms", 20)
         self.declare_parameter("init_command_duration_ms", 1500)
         self.declare_parameter("enable_inference_on_start", False)
-        self.declare_parameter("enable_me_block", False)
         self.declare_parameter("validate_servo_ids", False)
         self.declare_parameter("debug_dump_dir", "")
         self.declare_parameter("debug_dump_every_n", 0)
@@ -192,7 +191,6 @@ class MeActInferenceNodePy(Node):
         self.command_duration_ms = int(self.get_parameter("command_duration_ms").value)
         self.init_command_duration_ms = int(self.get_parameter("init_command_duration_ms").value)
         self.enable_inference_on_start = bool(self.get_parameter("enable_inference_on_start").value)
-        self.enable_me_block = bool(self.get_parameter("enable_me_block").value)
         self.validate_servo_ids = bool(self.get_parameter("validate_servo_ids").value)
         self.debug_dump_dir = str(self.get_parameter("debug_dump_dir").value)
         self.debug_dump_every_n = int(self.get_parameter("debug_dump_every_n").value)
@@ -430,7 +428,6 @@ class MeActInferenceNodePy(Node):
                 sample.frame.rgb_bgr,
                 sample.frame.depth_raw,
                 sample.servo.qpos,
-                use_me_block=self.enable_me_block,
             )
         except Exception as exc:
             self._state = RunState.FAULT
