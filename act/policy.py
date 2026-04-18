@@ -11,6 +11,7 @@ from torch.nn import functional as F
 import torchvision.transforms as transforms
 
 from act.detr.main import build_ACT_model_and_optimizer, build_CNNMLP_model_and_optimizer
+from act.prototype_loss import ActionPrototypeBank
 # import IPython
 # e = IPython.embed
 
@@ -24,7 +25,20 @@ class ACTPolicy(nn.Module):
         self.optimizer = optimizer
         self.kl_weight = args_override['kl_weight']
         self.action_l1_weight = float(args_override.get("action_l1_weight", 0.0))
+        self.enable_prototype_loss = bool(args_override.get("enable_prototype_loss", False))
+        self.prototype_loss_weight = float(args_override.get("prototype_loss_weight", 0.0))
         self.use_memory_image_input = bool(args_override.get("use_memory_image_input", False))
+        self.prototype_bank = None
+        prototype_file = str(args_override.get("prototype_file", "") or "").strip()
+        if self.enable_prototype_loss:
+            if not prototype_file:
+                raise ValueError("Prototype loss is enabled but prototype_file is empty.")
+            self.prototype_bank = ActionPrototypeBank.from_npz(
+                prototype_file,
+                temperature=float(args_override.get("prototype_temperature", 1.0)),
+            )
+            if device is not None:
+                self.prototype_bank = self.prototype_bank.to(device)
         print(f'KL Weight {self.kl_weight}')
 
     def _normalize_tensor(self, image):
@@ -105,10 +119,19 @@ class ACTPolicy(nn.Module):
             loss_dict['l1'] = l1
             loss_dict['kl'] = total_kld[0]
             loss_dict['action_l1'] = action_l1
+            if self.prototype_bank is not None:
+                proto_loss, proto_acc = self.prototype_bank.classification_loss(a_hat, actions)
+                loss_dict['prototype_loss'] = proto_loss
+                loss_dict['prototype_acc'] = proto_acc
+            else:
+                zero = a_hat.new_zeros(())
+                loss_dict['prototype_loss'] = zero
+                loss_dict['prototype_acc'] = zero
             loss_dict['loss'] = (
                 loss_dict['l1']
                 + loss_dict['kl'] * self.kl_weight
                 + loss_dict['action_l1'] * self.action_l1_weight
+                + loss_dict['prototype_loss'] * self.prototype_loss_weight
             )
             return loss_dict
         else: # inference time

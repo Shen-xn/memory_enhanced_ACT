@@ -35,6 +35,11 @@ class Config:
         self.WEIGHT_DECAY = 1e-4
         self.KL_WEIGHT = 5
         self.ACTION_L1_WEIGHT = 0.1
+        self.ENABLE_PROTOTYPE_LOSS = False
+        self.PROTOTYPE_FILE = ""
+        self.PROTOTYPE_LOSS_WEIGHT = 0.1
+        self.PROTOTYPE_TEMPERATURE = 1.0
+        self.PROTOTYPE_NUM_CLUSTERS = 32
 
         self.VAL_FREQ = 1
         self.SAVE_FREQ = 5
@@ -89,7 +94,8 @@ class Config:
 
     def start_new_experiment(self):
         """Create a fresh experiment name/path for a new training run."""
-        self.EXP_NAME = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        if not self.EXP_NAME:
+            self.EXP_NAME = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.EXP_LOG_DIR = os.path.join(self.LOG_ROOT, self.EXP_NAME)
         self.refresh_model_params()
 
@@ -140,6 +146,11 @@ class Config:
             "num_epochs": self.NUM_EPOCHS,
             "kl_weight": self.KL_WEIGHT,
             "action_l1_weight": self.ACTION_L1_WEIGHT,
+            "enable_prototype_loss": self.ENABLE_PROTOTYPE_LOSS,
+            "prototype_file": self.PROTOTYPE_FILE,
+            "prototype_loss_weight": self.PROTOTYPE_LOSS_WEIGHT,
+            "prototype_temperature": self.PROTOTYPE_TEMPERATURE,
+            "prototype_num_clusters": self.PROTOTYPE_NUM_CLUSTERS,
             "batch_size": self.BATCH_SIZE,
             "epochs": self.NUM_EPOCHS,
         }

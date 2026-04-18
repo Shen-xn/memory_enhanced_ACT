@@ -72,6 +72,10 @@ def init_model_and_optimizer(config):
         "lr_backbone": config.LR_BACKBONE,
         "weight_decay": config.WEIGHT_DECAY,
         "kl_weight": config.KL_WEIGHT,
+        "enable_prototype_loss": config.ENABLE_PROTOTYPE_LOSS,
+        "prototype_file": config.PROTOTYPE_FILE,
+        "prototype_loss_weight": config.PROTOTYPE_LOSS_WEIGHT,
+        "prototype_temperature": config.PROTOTYPE_TEMPERATURE,
         **config.MODEL_PARAMS
     }
     
@@ -292,7 +296,11 @@ def main():
             logger.info("该断点不含 RNG 状态，续训后 batch 顺序不会严格接续上次训练。")
     
     # Histories drive `training_curves.png`.
-    tracked_metric_keys = ["loss"] + (["l1", "kl", "action_l1"] if cfg.POLICY_CLASS == "ACTPolicy" else ["mse"])
+    tracked_metric_keys = ["loss"] + (
+        ["l1", "kl", "action_l1", "prototype_loss", "prototype_acc"]
+        if cfg.POLICY_CLASS == "ACTPolicy"
+        else ["mse"]
+    )
     train_metrics_history = {"x": [], **{k: [] for k in tracked_metric_keys}}
     val_metrics_history = {"x": [], **{k: [] for k in tracked_metric_keys}}
     val_obst_metrics_history = {"x": [], **{k: [] for k in tracked_metric_keys}}
