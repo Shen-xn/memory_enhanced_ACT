@@ -259,12 +259,40 @@ class ImitationDataset(Dataset):
             raise ValueError(
                 f"{phase_path} sample count mismatch: expected {expected_samples}, got {len(frame_index)}"
             )
+        if len(np.unique(frame_index)) != len(frame_index):
+            duplicate_frames = frame_index[
+                pd.Series(frame_index).duplicated(keep=False).to_numpy()
+            ].tolist()
+            raise ValueError(
+                f"{phase_path} contains duplicate frame_index values: {_preview_values(duplicate_frames)}"
+            )
+        expected_frames = set(range(expected_samples))
+        actual_frames = set(int(x) for x in frame_index.tolist())
+        missing_frames = expected_frames - actual_frames
+        extra_frames = actual_frames - expected_frames
+        if missing_frames or extra_frames:
+            raise ValueError(
+                f"{phase_path} frame_index does not match expected sample frames. "
+                f"Missing: {_preview_values(missing_frames)}; extra: {_preview_values(extra_frames)}"
+            )
+
+        # Target files can be written in shuffled dataset order. Always align by
+        # frame_index so image/qpos/future and phase supervision describe the
+        # same starting frame.
+        frame_to_row = {int(frame): row for row, frame in enumerate(frame_index)}
         return {
             "frame_index": frame_index,
+            "frame_to_row": frame_to_row,
             "pca_coord_tgt": pca_coord_tgt,
             "residual_tgt": residual_tgt,
             "pca_recon_tgt": pca_recon_tgt,
         }
+
+    def _phase_value_for_frame(self, phase_targets, key, frame_index):
+        row = phase_targets["frame_to_row"].get(int(frame_index))
+        if row is None:
+            raise KeyError(f"Missing phase target for frame_index={frame_index}")
+        return phase_targets[key][row]
 
     def _load_all_samples(self):
         samples = []
@@ -323,17 +351,17 @@ class ImitationDataset(Dataset):
                     "pca_coord_tgt": (
                         np.zeros((self.phase_pca_dim,), dtype=np.float32)
                         if phase_targets is None
-                        else phase_targets["pca_coord_tgt"][i]
+                        else self._phase_value_for_frame(phase_targets, "pca_coord_tgt", i)
                     ),
                     "residual_tgt": (
                         np.zeros((self.future_steps, len(JOINT_COLS)), dtype=np.float32)
                         if phase_targets is None
-                        else phase_targets["residual_tgt"][i]
+                        else self._phase_value_for_frame(phase_targets, "residual_tgt", i)
                     ),
                     "pca_recon_tgt": (
                         np.zeros((self.future_steps, len(JOINT_COLS)), dtype=np.float32)
                         if phase_targets is None
-                        else phase_targets["pca_recon_tgt"][i]
+                        else self._phase_value_for_frame(phase_targets, "pca_recon_tgt", i)
                     ),
                     "task": task_dir,
                     "frame_index": i,

@@ -24,6 +24,11 @@ fuse.cfg
 
 # Generation results
 results/
+analysis_outputs/
+*_inspection/
+inspection_*/
+strict_four_line_plots*/
+trajectory_analysis*/
 
 ray/auth.json
 

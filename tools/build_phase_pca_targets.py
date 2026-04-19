@@ -31,12 +31,11 @@ def build_argparser():
     return parser
 
 
-def _load_dataset(args, mode, joint_min_max=None):
+def _load_dataset(args):
     return ImitationDataset(
         args.data_root,
         future_steps=args.future_steps,
-        mode=mode,
-        joint_min_max=joint_min_max,
+        mode="train",
         image_channels=args.image_channels,
         target_mode=args.target_mode,
         delta_qpos_scale=args.delta_qpos_scale,
@@ -44,8 +43,26 @@ def _load_dataset(args, mode, joint_min_max=None):
     )
 
 
-def _stack_targets(samples):
-    vectors = np.stack([sample["future"].reshape(-1) for sample in samples], axis=0).astype(np.float32)
+def _target_from_raw(sample, target_mode, delta_qpos_scale):
+    future_raw = sample["future_raw"].astype(np.float32)
+    if target_mode == "absolute":
+        return future_raw
+
+    step_delta = np.empty_like(future_raw)
+    step_delta[0] = future_raw[0] - sample["curr_raw"].astype(np.float32)
+    if len(future_raw) > 1:
+        step_delta[1:] = future_raw[1:] - future_raw[:-1]
+    return step_delta / float(delta_qpos_scale)
+
+
+def _stack_targets(samples, target_mode, delta_qpos_scale):
+    vectors = np.stack(
+        [
+            _target_from_raw(sample, target_mode, delta_qpos_scale).reshape(-1)
+            for sample in samples
+        ],
+        axis=0,
+    ).astype(np.float32)
     task_names = [sample["task"] for sample in samples]
     frame_indices = np.array([sample["frame_index"] for sample in samples], dtype=np.int64)
     return vectors, task_names, frame_indices
@@ -66,6 +83,7 @@ def _write_per_task_targets(task_names, frame_indices, pca_coord_tgt, pca_recon_
 
     for task_name, indices in grouped.items():
         indices = np.asarray(indices, dtype=np.int64)
+        indices = indices[np.argsort(frame_indices[indices])]
         output_path = Path(task_name) / filename
         output_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez(
@@ -75,6 +93,34 @@ def _write_per_task_targets(task_names, frame_indices, pca_coord_tgt, pca_recon_
             pca_recon_tgt=pca_recon_tgt[indices],
             residual_tgt=residual_tgt[indices],
         )
+
+
+def _validate_written_targets(task_names, frame_indices, vectors, filename, atol=1e-5):
+    grouped = {}
+    for idx, task_name in enumerate(task_names):
+        grouped.setdefault(task_name, []).append(idx)
+
+    for task_name, indices in grouped.items():
+        indices = np.asarray(indices, dtype=np.int64)
+        order = np.argsort(frame_indices[indices])
+        sorted_indices = indices[order]
+        sorted_frames = frame_indices[sorted_indices]
+        output_path = Path(task_name) / filename
+        payload = np.load(output_path)
+
+        if not np.array_equal(payload["frame_index"].astype(np.int64), sorted_frames):
+            raise ValueError(f"{output_path} frame_index is not sorted/aligned after writing.")
+
+        expected = vectors[sorted_indices]
+        reconstructed = (
+            payload["pca_recon_tgt"].reshape(len(sorted_indices), -1)
+            + payload["residual_tgt"].reshape(len(sorted_indices), -1)
+        )
+        max_abs = float(np.max(np.abs(reconstructed - expected)))
+        if max_abs > atol:
+            raise ValueError(
+                f"{output_path} pca_recon_tgt + residual_tgt mismatch: max_abs={max_abs:.6g}"
+            )
 
 
 def main():
@@ -89,10 +135,13 @@ def main():
     explained_ratio = float(pca_bank["explained_ratio"][0]) if "explained_ratio" in pca_bank else float("nan")
     pca_dim = int(pca_bank["pca_dim"][0]) if "pca_dim" in pca_bank else int(components.shape[1])
 
-    train_dataset = _load_dataset(args, mode="train")
-    val_dataset = _load_dataset(args, mode="val", joint_min_max=train_dataset.joint_min_max)
-    all_samples = train_dataset.samples + val_dataset.samples
-    vectors, task_names, frame_indices = _stack_targets(all_samples)
+    dataset = _load_dataset(args)
+    all_samples = dataset.all_samples
+    vectors, task_names, frame_indices = _stack_targets(
+        all_samples,
+        target_mode=args.target_mode,
+        delta_qpos_scale=args.delta_qpos_scale,
+    )
 
     pca_coord_tgt = _project(vectors, mean, components).astype(np.float32)
     pca_recon_flat = _reconstruct(pca_coord_tgt, mean, components).astype(np.float32)
@@ -130,6 +179,12 @@ def main():
         pca_coord_tgt=pca_coord_tgt,
         pca_recon_tgt=pca_recon_tgt,
         residual_tgt=residual_tgt,
+        filename=args.target_filename,
+    )
+    _validate_written_targets(
+        task_names=task_names,
+        frame_indices=frame_indices,
+        vectors=vectors,
         filename=args.target_filename,
     )
 
