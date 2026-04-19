@@ -8,44 +8,82 @@ class Config:
     """Single source of truth for training and export configuration."""
 
     def __init__(self):
+        self._init_paths()
+        self._init_run_control()
+        self._init_data_and_targets()
+        self._init_optimization()
+        self._init_logging()
+        self._init_visual_model()
+        self._init_phase_pca_supervision()
+        self._init_misc_model_flags()
+
+        self.MODEL_PARAMS = {}
+        self.refresh_model_params()
+
+    def _init_paths(self):
         self.ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
         self.LOG_ROOT = os.path.join(self.ROOT_DIR, "log")
         self.DATA_ROOT = os.path.join(self.ROOT_DIR, "data_process", "data")
         self.EXP_NAME = ""
         self.EXP_LOG_DIR = ""
+        self.CKPT_DIR = ""
 
+    def _init_run_control(self):
         self.TRAIN_MODE = ""
         self.RESUME_CKPT_PATH = ""
+        self.SEED = 1
+        self.USE_CUDA = torch.cuda.is_available()
+        self.POLICY_CLASS = "ACTPolicy"
+        self.TASK_NAME = "custom_dataset"
 
+    def _init_data_and_targets(self):
+        self.FUTURE_STEPS = 10
+        self.STATE_DIM = 6
+
+        # Current training target is step-wise delta action, divided by DELTA_QPOS_SCALE.
+        self.PREDICT_DELTA_QPOS = True
+        self.DELTA_QPOS_SCALE = 10.0
+
+        # Current offline supervision path:
+        #   phase_pca16_targets.npz + _phase_pca16/phase_pca16_bank.npz
+        self.PHASE_TARGETS_FILENAME = "phase_pca16_targets.npz"
+        self.PHASE_BANK_PATH = os.path.join(
+            self.DATA_ROOT,
+            "_phase_pca16",
+            "phase_pca16_bank.npz",
+        )
+
+    def _init_optimization(self):
         self.NUM_EPOCHS = 40
         self.BATCH_SIZE = 16
         self.NUM_WORKERS = 8
-        self.FUTURE_STEPS = 10
-        self.PREDICT_DELTA_QPOS = True
-        self.DELTA_QPOS_SCALE = 10.0
 
         self.LR = 1e-5
         self.LR_BACKBONE = 1e-6
         self.WEIGHT_DECAY = 1e-4
         self.KL_WEIGHT = 1.0
 
-        self.PCA_COORD_LOSS_WEIGHT = 0.1
-        self.RESIDUAL_LOSS_WEIGHT = 1.0
+        # Total loss =
+        #   RECON_LOSS_WEIGHT * recon_l1
+        # + RESIDUAL_LOSS_WEIGHT * residual_l1
+        # + PCA_COORD_LOSS_WEIGHT * pca_coord_mse
+        # + KL_WEIGHT * kl
         self.RECON_LOSS_WEIGHT = 1.0
+        self.RESIDUAL_LOSS_WEIGHT = 1.0
+        self.PCA_COORD_LOSS_WEIGHT = 0.1
 
+    def _init_logging(self):
         self.VAL_FREQ = 1
         self.SAVE_FREQ = 5
         self.LOG_PRINT_FREQ = 200
         self.SAVE_PLOT = True
         self.PRINT_LOG = True
 
-        self.SEED = 1
-        self.USE_CUDA = torch.cuda.is_available()
-        self.POLICY_CLASS = "ACTPolicy"
-
+    def _init_visual_model(self):
         self.CAMERA_NAMES = ["gemini"]
         self.IMAGE_CHANNELS = 4
         self.DEPTH_CHANNEL = True
+
         self.BACKBONE = "resnet18"
         self.POSITION_EMBEDDING = "sine"
         self.DILATION = False
@@ -58,30 +96,29 @@ class Config:
         self.DIM_FEEDFORWARD = 2048
         self.HIDDEN_DIM = 512
         self.NHEADS = 8
-        self.NUM_QUERIES = self.FUTURE_STEPS
-        self.STATE_DIM = 6
 
+        self.NUM_QUERIES = self.FUTURE_STEPS
+        self.CHUNK_SIZE = self.FUTURE_STEPS
+
+    def _init_phase_pca_supervision(self):
+        # Main method:
+        # - phase token enters encoder only
+        # - PCA head predicts 16D orthogonal coordinates
+        # - residual head predicts all-joint residual actions
         self.USE_PHASE_TOKEN = True
-        self.PHASE_TARGETS_FILENAME = "phase_pca16_targets.npz"
-        self.PHASE_BANK_PATH = os.path.join(
-            self.DATA_ROOT, "_phase_pca16", "phase_pca16_bank.npz"
-        )
         self.PHASE_PCA_DIM = 16
+
+        # PCA head is intentionally deeper than the residual head.
         self.PCA_HEAD_HIDDEN_DIM = 1024
         self.PCA_HEAD_DEPTH = 3
 
+    def _init_misc_model_flags(self):
         self.MASKS = False
         self.LR_DROP = 200
         self.CLIP_MAX_NORM = 0.1
-        self.CHUNK_SIZE = self.FUTURE_STEPS
         self.TEMPORAL_AGG = False
         self.EVAL = False
         self.ONSCREEN_RENDER = False
-        self.CKPT_DIR = self.EXP_LOG_DIR
-        self.TASK_NAME = "custom_dataset"
-
-        self.MODEL_PARAMS = {}
-        self.refresh_model_params()
 
     def start_new_experiment(self):
         if not self.EXP_NAME:
@@ -90,9 +127,10 @@ class Config:
         self.refresh_model_params()
 
     def refresh_model_params(self):
-        self.NUM_QUERIES = self.FUTURE_STEPS
-        self.CHUNK_SIZE = self.FUTURE_STEPS
+        self.NUM_QUERIES = int(self.FUTURE_STEPS)
+        self.CHUNK_SIZE = int(self.FUTURE_STEPS)
         self.CKPT_DIR = self.EXP_LOG_DIR or ""
+
         self.IMAGE_CHANNELS = int(self.IMAGE_CHANNELS)
         if self.IMAGE_CHANNELS not in (3, 4):
             raise ValueError(f"IMAGE_CHANNELS must be 3 or 4, got {self.IMAGE_CHANNELS}")
@@ -149,6 +187,7 @@ class Config:
                 setattr(self, key, value)
 
         model_params = ckpt_config.get("MODEL_PARAMS") or {}
+
         if "IMAGE_CHANNELS" not in ckpt_config and "image_channels" in model_params:
             self.IMAGE_CHANNELS = int(model_params["image_channels"])
         if "PHASE_PCA_DIM" not in ckpt_config and "phase_pca_dim" in model_params:
@@ -161,7 +200,9 @@ class Config:
             if "pca_coord_loss_weight" in model_params:
                 self.PCA_COORD_LOSS_WEIGHT = float(model_params["pca_coord_loss_weight"])
             elif "prototype_loss_weight" in model_params:
+                # Backward-compatible read for older checkpoints.
                 self.PCA_COORD_LOSS_WEIGHT = float(model_params["prototype_loss_weight"])
+
         self.refresh_model_params()
 
 
