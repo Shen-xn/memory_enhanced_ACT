@@ -1,20 +1,25 @@
 # me_act_inference
 
-ROS2 deployment package for the baseline single-image ACT runtime.
+ROS2 deployment package for the single-image ACT runtime.
 
 ## Scope
 
-This package now supports only the baseline deploy path:
+这个包现在支持同一套 deploy 产物接口下的两种模型：
+
+1. **Baseline ACT**
+2. **PCA 正交分解方法**
+
+统一推理路径：
 
 ```text
 rgb + depth + servo_state(service) -> BGRA preprocess -> act_inference.pt -> cmd0 -> bus_servo/set_position
 ```
 
-Removed from this package:
+已移除：
 
 - `me_block`
 - `memory_image`
-- online memory-specific launches
+- 旧在线 memory 专用 launch
 
 ## Launch
 
@@ -30,7 +35,7 @@ Python node:
 ros2 launch me_act_inference_py me_act_baseline_py.launch.py
 ```
 
-Use CPU only for debugging:
+只用 CPU 调试：
 
 ```bash
 ros2 launch me_act_inference me_act_baseline.launch.py device:=cpu
@@ -45,7 +50,16 @@ deploy_artifacts_baseline/
   deploy_config.yml
 ```
 
-`deploy_config.yml` controls image geometry and tensor layout. The node always builds a BGRA input and feeds it to the exported ACT wrapper.
+`deploy_config.yml` 会写明：
+
+- 图像几何 / 输入张量信息
+- `predict_delta_qpos`
+- `delta_qpos_scale`
+- `use_phase_pca_supervision`
+- `use_phase_token`
+- `phase_pca_dim`
+
+节点本身不需要手工区分 baseline 还是 PCA 模型，它只需要加载导出的 `act_inference.pt`。
 
 ## Topics and services
 

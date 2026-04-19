@@ -19,6 +19,7 @@ class ACTPolicy(nn.Module):
         self.model = model
         self.optimizer = optimizer
         self.kl_weight = float(args_override["kl_weight"])
+        self.use_phase_pca_supervision = bool(args_override.get("use_phase_pca_supervision", True))
         self.pca_coord_loss_weight = float(args_override.get("pca_coord_loss_weight", 0.1))
         self.residual_loss_weight = float(args_override.get("residual_loss_weight", 1.0))
         self.recon_loss_weight = float(args_override.get("recon_loss_weight", 1.0))
@@ -85,26 +86,33 @@ class ACTPolicy(nn.Module):
             valid_mask = (~is_pad).unsqueeze(-1)
 
             recon_l1 = (F.l1_loss(actions, action_hat, reduction="none") * valid_mask).mean()
-            pca_coord_targets_norm = self.model.normalize_pca_coords(pca_coord_targets)
-            residual_targets_norm = self.model.normalize_residual(residual_targets)
+            if self.use_phase_pca_supervision:
+                pca_coord_targets_norm = self.model.normalize_pca_coords(pca_coord_targets)
+                residual_targets_norm = self.model.normalize_residual(residual_targets)
 
-            residual_l1 = (
-                F.l1_loss(aux["residual_norm"], residual_targets_norm, reduction="none") * valid_mask
-            ).mean()
-            pca_coord_mse = F.mse_loss(aux["pca_coord_norm"], pca_coord_targets_norm)
+                residual_l1 = (
+                    F.l1_loss(aux["residual_norm"], residual_targets_norm, reduction="none") * valid_mask
+                ).mean()
+                pca_coord_mse = F.mse_loss(aux["pca_coord_norm"], pca_coord_targets_norm)
 
-            loss_dict = {
-                "recon_l1": recon_l1,
-                "residual_l1": residual_l1,
-                "pca_coord_mse": pca_coord_mse,
-                "kl": total_kld[0],
-            }
-            loss_dict["loss"] = (
-                loss_dict["recon_l1"] * self.recon_loss_weight
-                + loss_dict["residual_l1"] * self.residual_loss_weight
-                + loss_dict["pca_coord_mse"] * self.pca_coord_loss_weight
-                + loss_dict["kl"] * self.kl_weight
-            )
+                loss_dict = {
+                    "recon_l1": recon_l1,
+                    "residual_l1": residual_l1,
+                    "pca_coord_mse": pca_coord_mse,
+                    "kl": total_kld[0],
+                }
+                loss_dict["loss"] = (
+                    loss_dict["recon_l1"] * self.recon_loss_weight
+                    + loss_dict["residual_l1"] * self.residual_loss_weight
+                    + loss_dict["pca_coord_mse"] * self.pca_coord_loss_weight
+                    + loss_dict["kl"] * self.kl_weight
+                )
+            else:
+                loss_dict = {
+                    "recon_l1": recon_l1,
+                    "kl": total_kld[0],
+                }
+                loss_dict["loss"] = loss_dict["recon_l1"] * self.recon_loss_weight + loss_dict["kl"] * self.kl_weight
             return loss_dict
 
         action_hat, _, (_, _), _ = self.model(qpos, image, env_state)

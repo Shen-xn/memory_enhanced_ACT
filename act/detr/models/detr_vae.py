@@ -48,6 +48,7 @@ class DETRVAE(nn.Module):
         camera_names,
         image_channels,
         use_phase_token,
+        use_phase_pca_supervision,
         phase_bank_path,
         predict_delta_qpos=False,
         delta_qpos_scale=10.0,
@@ -65,41 +66,47 @@ class DETRVAE(nn.Module):
         self.encoder = encoder
         hidden_dim = transformer.d_model
 
-        self.use_phase_token = bool(use_phase_token)
+        self.use_phase_pca_supervision = bool(use_phase_pca_supervision)
+        self.use_phase_token = bool(use_phase_token) and self.use_phase_pca_supervision
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
         self.residual_head = nn.Linear(hidden_dim, state_dim)
         self.is_pad_head = nn.Linear(hidden_dim, 1)
+        self.phase_bank = None
+        self.pca_head = None
+        self.phase_token_embed = None
+        self.phase_pos_embed = None
 
-        if not phase_bank_path:
-            raise ValueError("phase_bank_path must be provided for phase-token prototype training.")
-        self.phase_bank = PhasePCABank.from_npz(phase_bank_path)
-        if phase_pca_dim and phase_pca_dim != self.phase_bank.pca_dim:
-            raise ValueError(
-                f"phase_pca_dim={phase_pca_dim} does not match bank={self.phase_bank.pca_dim}"
-            )
-        if self.phase_bank.action_dim != num_queries * state_dim:
-            raise ValueError(
-                f"phase bank action_dim={self.phase_bank.action_dim} does not match {num_queries}x{state_dim}"
-            )
+        if self.use_phase_pca_supervision:
+            if not phase_bank_path:
+                raise ValueError("phase_bank_path must be provided when USE_PHASE_PCA_SUPERVISION is enabled.")
+            self.phase_bank = PhasePCABank.from_npz(phase_bank_path)
+            if phase_pca_dim and phase_pca_dim != self.phase_bank.pca_dim:
+                raise ValueError(
+                    f"phase_pca_dim={phase_pca_dim} does not match bank={self.phase_bank.pca_dim}"
+                )
+            if self.phase_bank.action_dim != num_queries * state_dim:
+                raise ValueError(
+                    f"phase bank action_dim={self.phase_bank.action_dim} does not match {num_queries}x{state_dim}"
+                )
 
-        self.register_buffer("pca_components", self.phase_bank.pca_components.clone())
-        self.register_buffer("pca_mean", self.phase_bank.pca_mean.clone())
-        self.register_buffer("pca_coord_mean", self.phase_bank.pca_coord_mean.clone())
-        self.register_buffer("pca_coord_std", self.phase_bank.pca_coord_std.clone())
-        self.register_buffer("residual_mean", self.phase_bank.residual_mean.clone())
-        self.register_buffer("residual_std", self.phase_bank.residual_std.clone())
+            self.register_buffer("pca_components", self.phase_bank.pca_components.clone())
+            self.register_buffer("pca_mean", self.phase_bank.pca_mean.clone())
+            self.register_buffer("pca_coord_mean", self.phase_bank.pca_coord_mean.clone())
+            self.register_buffer("pca_coord_std", self.phase_bank.pca_coord_std.clone())
+            self.register_buffer("residual_mean", self.phase_bank.residual_mean.clone())
+            self.register_buffer("residual_std", self.phase_bank.residual_std.clone())
 
-        pca_layers = []
-        in_dim = hidden_dim
-        hidden_dim_pca = int(pca_head_hidden_dim)
-        depth = max(int(pca_head_depth), 1)
-        for _ in range(depth - 1):
-            pca_layers.extend([nn.Linear(in_dim, hidden_dim_pca), nn.ReLU(inplace=True)])
-            in_dim = hidden_dim_pca
-        pca_layers.append(nn.Linear(in_dim, self.phase_bank.pca_dim))
-        self.pca_head = nn.Sequential(*pca_layers)
-        self.phase_token_embed = nn.Embedding(1, hidden_dim)
-        self.phase_pos_embed = nn.Embedding(1, hidden_dim)
+            pca_layers = []
+            in_dim = hidden_dim
+            hidden_dim_pca = int(pca_head_hidden_dim)
+            depth = max(int(pca_head_depth), 1)
+            for _ in range(depth - 1):
+                pca_layers.extend([nn.Linear(in_dim, hidden_dim_pca), nn.ReLU(inplace=True)])
+                in_dim = hidden_dim_pca
+            pca_layers.append(nn.Linear(in_dim, self.phase_bank.pca_dim))
+            self.pca_head = nn.Sequential(*pca_layers)
+            self.phase_token_embed = nn.Embedding(1, hidden_dim)
+            self.phase_pos_embed = nn.Embedding(1, hidden_dim)
 
         if backbones is not None:
             self.input_proj = nn.Conv2d(backbones[0].num_channels, hidden_dim, kernel_size=1)
@@ -126,15 +133,23 @@ class DETRVAE(nn.Module):
         return phase_token, phase_pos
 
     def normalize_pca_coords(self, coords):
+        if not self.use_phase_pca_supervision:
+            return coords
         return (coords - self.pca_coord_mean) / self.pca_coord_std
 
     def denormalize_pca_coords(self, coords_norm):
+        if not self.use_phase_pca_supervision:
+            return coords_norm
         return coords_norm * self.pca_coord_std + self.pca_coord_mean
 
     def normalize_residual(self, residual):
+        if not self.use_phase_pca_supervision:
+            return residual
         return (residual - self.residual_mean) / self.residual_std
 
     def denormalize_residual(self, residual_norm):
+        if not self.use_phase_pca_supervision:
+            return residual_norm
         return residual_norm * self.residual_std + self.residual_mean
 
     def forward(self, qpos, image, env_state=None, actions=None, is_pad=None):
@@ -175,8 +190,11 @@ class DETRVAE(nn.Module):
             src = torch.cat(all_cam_features, axis=3)
             pos = torch.cat(all_cam_pos, axis=3)
 
-            phase_token, phase_pos = self._build_phase_token_inputs(batch_size, src.device)
-            hs, phase_memory = self.transformer(
+            phase_token = None
+            phase_pos = None
+            if self.use_phase_token:
+                phase_token, phase_pos = self._build_phase_token_inputs(batch_size, src.device)
+            transformer_output = self.transformer(
                 src,
                 None,
                 None,
@@ -189,6 +207,11 @@ class DETRVAE(nn.Module):
                 encoder_prefix_pos_embed=phase_pos if self.use_phase_token else None,
                 return_prefix_memory=self.use_phase_token,
             )
+            if self.use_phase_token:
+                hs, phase_memory = transformer_output
+            else:
+                hs = transformer_output
+                phase_memory = None
             if hs.dim() == 4:
                 hs = hs[-1]
         else:
@@ -201,13 +224,22 @@ class DETRVAE(nn.Module):
             phase_memory = hs.mean(dim=1, keepdim=True).transpose(0, 1)
 
         residual_norm = self.residual_head(hs)
-        phase_feat = phase_memory[0]
-        pca_coord_norm = self.pca_head(phase_feat)
-        pca_coord = self.denormalize_pca_coords(pca_coord_norm)
-        pca_recon_flat = torch.matmul(pca_coord, self.pca_components.T) + self.pca_mean.unsqueeze(0)
-        pca_recon_action = pca_recon_flat.view(batch_size, self.num_queries, -1)
-        residual = self.denormalize_residual(residual_norm)
-        action_hat = pca_recon_action + residual
+        if self.use_phase_pca_supervision:
+            if phase_memory is None:
+                raise RuntimeError("phase_memory is required when USE_PHASE_PCA_SUPERVISION is enabled.")
+            phase_feat = phase_memory[0]
+            pca_coord_norm = self.pca_head(phase_feat)
+            pca_coord = self.denormalize_pca_coords(pca_coord_norm)
+            pca_recon_flat = torch.matmul(pca_coord, self.pca_components.T) + self.pca_mean.unsqueeze(0)
+            pca_recon_action = pca_recon_flat.view(batch_size, self.num_queries, -1)
+            residual = self.denormalize_residual(residual_norm)
+            action_hat = pca_recon_action + residual
+        else:
+            pca_coord_norm = None
+            pca_coord = None
+            pca_recon_action = None
+            residual = residual_norm
+            action_hat = residual
         is_pad_hat = self.is_pad_head(hs)
 
         aux = {
@@ -290,6 +322,7 @@ def build(args):
         camera_names=args.camera_names,
         image_channels=args.image_channels,
         use_phase_token=args.use_phase_token,
+        use_phase_pca_supervision=getattr(args, "use_phase_pca_supervision", True),
         phase_bank_path=args.phase_bank_path,
         predict_delta_qpos=getattr(args, "predict_delta_qpos", False),
         delta_qpos_scale=getattr(args, "delta_qpos_scale", 10.0),

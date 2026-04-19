@@ -198,6 +198,8 @@ def main():
         target_mode="delta" if cfg.PREDICT_DELTA_QPOS else "absolute",
         delta_qpos_scale=cfg.DELTA_QPOS_SCALE,
         phase_targets_filename=cfg.PHASE_TARGETS_FILENAME,
+        require_phase_targets=cfg.USE_PHASE_PCA_SUPERVISION,
+        phase_pca_dim=cfg.PHASE_PCA_DIM,
     )
 
     model, optimizer = init_model_and_optimizer(cfg)
@@ -216,11 +218,12 @@ def main():
 
     logger.info(f"===== 实验目录: {cfg.EXP_LOG_DIR} =====")
     val_has_obstacle = bool(getattr(val_loader.dataset, "split_has_obstacle_samples", False))
-    tracked_metric_keys = (
-        ["loss", "recon_l1", "residual_l1", "pca_coord_mse", "kl"]
-        if cfg.POLICY_CLASS == "ACTPolicy"
-        else ["loss", "mse"]
-    )
+    if cfg.POLICY_CLASS == "ACTPolicy":
+        tracked_metric_keys = ["loss", "recon_l1", "kl"]
+        if cfg.USE_PHASE_PCA_SUPERVISION:
+            tracked_metric_keys = ["loss", "recon_l1", "residual_l1", "pca_coord_mse", "kl"]
+    else:
+        tracked_metric_keys = ["loss", "mse"]
     train_metrics_history = {"x": [], **{k: [] for k in tracked_metric_keys}}
     val_metrics_history = {"x": [], **{k: [] for k in tracked_metric_keys}}
     val_obst_metrics_history = {"x": [], **{k: [] for k in tracked_metric_keys}}

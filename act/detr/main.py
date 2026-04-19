@@ -39,6 +39,7 @@ def get_args_parser():
     parser.add_argument("--state_dim", default=6, type=int)
 
     parser.add_argument("--use_phase_token", default=True, type=bool)
+    parser.add_argument("--use_phase_pca_supervision", default=True, type=bool)
     parser.add_argument("--phase_bank_path", default="", type=str)
     parser.add_argument("--phase_pca_dim", default=0, type=int)
     parser.add_argument("--pca_head_hidden_dim", default=1024, type=int)

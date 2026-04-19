@@ -181,6 +181,7 @@ class ImitationDataset(Dataset):
         delta_qpos_scale=10.0,
         phase_targets_filename="phase_pca16_targets.npz",
         require_phase_targets=True,
+        phase_pca_dim=16,
     ):
         self.data_root = data_root
         self.future_steps = future_steps
@@ -194,6 +195,7 @@ class ImitationDataset(Dataset):
         self.delta_qpos_scale = float(delta_qpos_scale)
         self.phase_targets_filename = phase_targets_filename
         self.require_phase_targets = bool(require_phase_targets)
+        self.phase_pca_dim = int(phase_pca_dim)
 
         if self.image_channels not in (3, 4):
             raise ValueError(f"image_channels must be 3 or 4, got {self.image_channels}")
@@ -318,9 +320,21 @@ class ImitationDataset(Dataset):
                     "img_path": img_paths[i],
                     "curr_raw": df.iloc[i][JOINT_COLS].values.astype(np.float32),
                     "future_raw": df.iloc[i + 1 : i + 1 + self.future_steps][JOINT_COLS].values.astype(np.float32),
-                    "pca_coord_tgt": None if phase_targets is None else phase_targets["pca_coord_tgt"][i],
-                    "residual_tgt": None if phase_targets is None else phase_targets["residual_tgt"][i],
-                    "pca_recon_tgt": None if phase_targets is None else phase_targets["pca_recon_tgt"][i],
+                    "pca_coord_tgt": (
+                        np.zeros((self.phase_pca_dim,), dtype=np.float32)
+                        if phase_targets is None
+                        else phase_targets["pca_coord_tgt"][i]
+                    ),
+                    "residual_tgt": (
+                        np.zeros((self.future_steps, len(JOINT_COLS)), dtype=np.float32)
+                        if phase_targets is None
+                        else phase_targets["residual_tgt"][i]
+                    ),
+                    "pca_recon_tgt": (
+                        np.zeros((self.future_steps, len(JOINT_COLS)), dtype=np.float32)
+                        if phase_targets is None
+                        else phase_targets["pca_recon_tgt"][i]
+                    ),
                     "task": task_dir,
                     "frame_index": i,
                     "obst": is_obstacle and i > 0,
@@ -478,6 +492,8 @@ def get_data_loaders(
     target_mode="absolute",
     delta_qpos_scale=10.0,
     phase_targets_filename="phase_pca16_targets.npz",
+    require_phase_targets=True,
+    phase_pca_dim=16,
 ):
     train_dataset = ImitationDataset(
         data_root,
@@ -487,7 +503,8 @@ def get_data_loaders(
         target_mode=target_mode,
         delta_qpos_scale=delta_qpos_scale,
         phase_targets_filename=phase_targets_filename,
-        require_phase_targets=True,
+        require_phase_targets=require_phase_targets,
+        phase_pca_dim=phase_pca_dim,
     )
     val_dataset = ImitationDataset(
         data_root,
@@ -498,7 +515,8 @@ def get_data_loaders(
         target_mode=target_mode,
         delta_qpos_scale=delta_qpos_scale,
         phase_targets_filename=phase_targets_filename,
-        require_phase_targets=True,
+        require_phase_targets=require_phase_targets,
+        phase_pca_dim=phase_pca_dim,
     )
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)

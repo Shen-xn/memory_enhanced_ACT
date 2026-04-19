@@ -148,7 +148,7 @@ def plot_training_curves(train_metrics, val_metrics, val_obst_metrics, save_path
 
     # Bottom panel: policy-specific detail metrics.
     ax2 = axes[1]
-    if "recon_l1" in train_metrics:
+    if "recon_l1" in train_metrics and "residual_l1" in train_metrics:
         _plot_metric_series(ax2, train_x, train_metrics.get("recon_l1", []), label="Train Recon L1", color="green", linewidth=1.8)
         _plot_metric_series(ax2, val_x, val_metrics.get("recon_l1", []), label="Val (Normal) Recon L1", color="purple", linewidth=2.2, marker="o")
         _plot_metric_series(ax2, val_obst_x, val_obst_metrics.get("recon_l1", []), label="Val (Obstacle) Recon L1", color="brown", linewidth=2.2, marker="o")
@@ -167,6 +167,23 @@ def plot_training_curves(train_metrics, val_metrics, val_obst_metrics, save_path
         ax2.set_xlabel("Epoch Progress")
         ax2.set_ylabel("Action Loss")
         ax2_twin.set_ylabel("PCA Coord / KL")
+        lines1, labels1 = ax2.get_legend_handles_labels()
+        lines2, labels2 = ax2_twin.get_legend_handles_labels()
+        ax2.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
+        ax2.grid(True)
+    elif "recon_l1" in train_metrics:
+        _plot_metric_series(ax2, train_x, train_metrics.get("recon_l1", []), label="Train Recon L1", color="green", linewidth=1.8)
+        _plot_metric_series(ax2, val_x, val_metrics.get("recon_l1", []), label="Val (Normal) Recon L1", color="purple", linewidth=2.2, marker="o")
+        _plot_metric_series(ax2, val_obst_x, val_obst_metrics.get("recon_l1", []), label="Val (Obstacle) Recon L1", color="brown", linewidth=2.2, marker="o")
+
+        ax2_twin = ax2.twinx()
+        _plot_metric_series(ax2_twin, train_x, train_metrics.get("kl", []), label="Train KL", color="cyan", linewidth=1.8, linestyle="--")
+        _plot_metric_series(ax2_twin, val_x, val_metrics.get("kl", []), label="Val (Normal) KL", color="magenta", linewidth=2.0, linestyle="--", marker="o")
+        _plot_metric_series(ax2_twin, val_obst_x, val_obst_metrics.get("kl", []), label="Val (Obstacle) KL", color="gray", linewidth=2.0, linestyle="--", marker="o")
+
+        ax2.set_xlabel("Epoch Progress")
+        ax2.set_ylabel("Recon L1")
+        ax2_twin.set_ylabel("KL")
         lines1, labels1 = ax2.get_legend_handles_labels()
         lines2, labels2 = ax2_twin.get_legend_handles_labels()
         ax2.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
