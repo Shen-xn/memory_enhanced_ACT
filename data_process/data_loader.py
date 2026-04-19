@@ -38,7 +38,12 @@ def get_fixed_joint_stats():
 
 
 def read_bgra_image(path):
-    image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    image = None
+    buffer = np.fromfile(path, dtype=np.uint8)
+    if buffer.size > 0:
+        image = cv2.imdecode(buffer, cv2.IMREAD_UNCHANGED)
+    if image is None:
+        image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if image is None:
         raise FileNotFoundError(f"Failed to read image: {path}")
     if image.ndim != 3 or image.shape[2] != 4:
@@ -174,7 +179,7 @@ class ImitationDataset(Dataset):
         image_channels=4,
         target_mode="absolute",
         delta_qpos_scale=10.0,
-        phase_targets_filename="phase_proto_targets.npz",
+        phase_targets_filename="phase_pca16_targets.npz",
         require_phase_targets=True,
     ):
         self.data_root = data_root
@@ -245,18 +250,18 @@ class ImitationDataset(Dataset):
 
         payload = np.load(phase_path)
         frame_index = payload["frame_index"].astype(np.int64)
-        alpha_tgt = payload["alpha_tgt"].astype(np.float32)
+        pca_coord_tgt = payload["pca_coord_tgt"].astype(np.float32)
         residual_tgt = payload["residual_tgt"].astype(np.float32)
-        prototype_tgt = payload["prototype_tgt"].astype(np.float32)
+        pca_recon_tgt = payload["pca_recon_tgt"].astype(np.float32)
         if len(frame_index) != expected_samples:
             raise ValueError(
                 f"{phase_path} sample count mismatch: expected {expected_samples}, got {len(frame_index)}"
             )
         return {
             "frame_index": frame_index,
-            "alpha_tgt": alpha_tgt,
+            "pca_coord_tgt": pca_coord_tgt,
             "residual_tgt": residual_tgt,
-            "prototype_tgt": prototype_tgt,
+            "pca_recon_tgt": pca_recon_tgt,
         }
 
     def _load_all_samples(self):
@@ -313,9 +318,9 @@ class ImitationDataset(Dataset):
                     "img_path": img_paths[i],
                     "curr_raw": df.iloc[i][JOINT_COLS].values.astype(np.float32),
                     "future_raw": df.iloc[i + 1 : i + 1 + self.future_steps][JOINT_COLS].values.astype(np.float32),
-                    "alpha_tgt": None if phase_targets is None else phase_targets["alpha_tgt"][i],
+                    "pca_coord_tgt": None if phase_targets is None else phase_targets["pca_coord_tgt"][i],
                     "residual_tgt": None if phase_targets is None else phase_targets["residual_tgt"][i],
-                    "prototype_tgt": None if phase_targets is None else phase_targets["prototype_tgt"][i],
+                    "pca_recon_tgt": None if phase_targets is None else phase_targets["pca_recon_tgt"][i],
                     "task": task_dir,
                     "frame_index": i,
                     "obst": is_obstacle and i > 0,
@@ -457,11 +462,11 @@ class ImitationDataset(Dataset):
 
         curr = torch.from_numpy(sample["curr"]).float()
         future = torch.from_numpy(sample["future"]).float()
-        alpha_tgt = torch.from_numpy(sample["alpha_tgt"]).float()
+        pca_coord_tgt = torch.from_numpy(sample["pca_coord_tgt"]).float()
         residual_tgt = torch.from_numpy(sample["residual_tgt"]).float()
-        prototype_tgt = torch.from_numpy(sample["prototype_tgt"]).float()
+        pca_recon_tgt = torch.from_numpy(sample["pca_recon_tgt"]).float()
         obst = torch.tensor([sample["obst"]], dtype=torch.bool)
-        return img, curr, future, alpha_tgt, residual_tgt, prototype_tgt, obst
+        return img, curr, future, pca_coord_tgt, residual_tgt, pca_recon_tgt, obst
 
 
 def get_data_loaders(
@@ -472,7 +477,7 @@ def get_data_loaders(
     image_channels=4,
     target_mode="absolute",
     delta_qpos_scale=10.0,
-    phase_targets_filename="phase_proto_targets.npz",
+    phase_targets_filename="phase_pca16_targets.npz",
 ):
     train_dataset = ImitationDataset(
         data_root,

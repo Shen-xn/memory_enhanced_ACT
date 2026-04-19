@@ -29,7 +29,7 @@ class Config:
         self.WEIGHT_DECAY = 1e-4
         self.KL_WEIGHT = 1.0
 
-        self.PROTOTYPE_LOSS_WEIGHT = 0.1
+        self.PCA_COORD_LOSS_WEIGHT = 0.1
         self.RESIDUAL_LOSS_WEIGHT = 1.0
         self.RECON_LOSS_WEIGHT = 1.0
 
@@ -62,13 +62,13 @@ class Config:
         self.STATE_DIM = 6
 
         self.USE_PHASE_TOKEN = True
-        self.PHASE_TARGETS_FILENAME = "phase_proto_targets.npz"
+        self.PHASE_TARGETS_FILENAME = "phase_pca16_targets.npz"
         self.PHASE_BANK_PATH = os.path.join(
-            self.DATA_ROOT, "_phase_proto", "phase_proto_bank.npz"
+            self.DATA_ROOT, "_phase_pca16", "phase_pca16_bank.npz"
         )
-        self.PHASE_NUM_PROTOTYPES = 16
-        self.PHASE_PCA_DIM = 0
-        self.PHASE_PCA_VAR_RATIO = 0.85
+        self.PHASE_PCA_DIM = 16
+        self.PCA_HEAD_HIDDEN_DIM = 1024
+        self.PCA_HEAD_DEPTH = 3
 
         self.MASKS = False
         self.LR_DROP = 200
@@ -119,9 +119,9 @@ class Config:
             "delta_qpos_scale": self.DELTA_QPOS_SCALE,
             "use_phase_token": self.USE_PHASE_TOKEN,
             "phase_bank_path": self.PHASE_BANK_PATH,
-            "phase_num_prototypes": self.PHASE_NUM_PROTOTYPES,
             "phase_pca_dim": self.PHASE_PCA_DIM,
-            "phase_pca_var_ratio": self.PHASE_PCA_VAR_RATIO,
+            "pca_head_hidden_dim": self.PCA_HEAD_HIDDEN_DIM,
+            "pca_head_depth": self.PCA_HEAD_DEPTH,
             "masks": self.MASKS,
             "lr_drop": self.LR_DROP,
             "clip_max_norm": self.CLIP_MAX_NORM,
@@ -135,7 +135,7 @@ class Config:
             "seed": self.SEED,
             "num_epochs": self.NUM_EPOCHS,
             "kl_weight": self.KL_WEIGHT,
-            "prototype_loss_weight": self.PROTOTYPE_LOSS_WEIGHT,
+            "pca_coord_loss_weight": self.PCA_COORD_LOSS_WEIGHT,
             "residual_loss_weight": self.RESIDUAL_LOSS_WEIGHT,
             "recon_loss_weight": self.RECON_LOSS_WEIGHT,
             "batch_size": self.BATCH_SIZE,
@@ -151,10 +151,17 @@ class Config:
         model_params = ckpt_config.get("MODEL_PARAMS") or {}
         if "IMAGE_CHANNELS" not in ckpt_config and "image_channels" in model_params:
             self.IMAGE_CHANNELS = int(model_params["image_channels"])
-        if "PHASE_NUM_PROTOTYPES" not in ckpt_config and "phase_num_prototypes" in model_params:
-            self.PHASE_NUM_PROTOTYPES = int(model_params["phase_num_prototypes"])
         if "PHASE_PCA_DIM" not in ckpt_config and "phase_pca_dim" in model_params:
             self.PHASE_PCA_DIM = int(model_params["phase_pca_dim"])
+        if "PCA_HEAD_HIDDEN_DIM" not in ckpt_config and "pca_head_hidden_dim" in model_params:
+            self.PCA_HEAD_HIDDEN_DIM = int(model_params["pca_head_hidden_dim"])
+        if "PCA_HEAD_DEPTH" not in ckpt_config and "pca_head_depth" in model_params:
+            self.PCA_HEAD_DEPTH = int(model_params["pca_head_depth"])
+        if "PCA_COORD_LOSS_WEIGHT" not in ckpt_config:
+            if "pca_coord_loss_weight" in model_params:
+                self.PCA_COORD_LOSS_WEIGHT = float(model_params["pca_coord_loss_weight"])
+            elif "prototype_loss_weight" in model_params:
+                self.PCA_COORD_LOSS_WEIGHT = float(model_params["prototype_loss_weight"])
         self.refresh_model_params()
 
 

@@ -1,13 +1,13 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 """
-DETR-VAE backbone adapted for phase-token prototype-residual learning.
+DETR-VAE backbone adapted for phase-token PCA-residual learning.
 
 Key design:
 - a phase token enters the visual transformer encoder only;
 - the decoder never cross-attends to the phase token;
-- the prototype branch predicts all-joint action templates via mixture weights;
+- the PCA branch predicts low-dimensional orthogonal coordinates;
 - the residual branch predicts all-joint residual actions;
-- final action = prototype mixture + residual.
+- final action = pca_recon + residual.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import torch
 from torch import nn
 from torch.autograd import Variable
 
-from act.phase_prototype import PhasePrototypeBank
+from act.phase_pca import PhasePCABank
 from .backbone import build_backbone
 from .transformer import build_transformer, TransformerEncoder, TransformerEncoderLayer
 
@@ -49,9 +49,11 @@ class DETRVAE(nn.Module):
         image_channels,
         use_phase_token,
         phase_bank_path,
-        phase_num_prototypes,
         predict_delta_qpos=False,
         delta_qpos_scale=10.0,
+        phase_pca_dim=16,
+        pca_head_hidden_dim=1024,
+        pca_head_depth=3,
     ):
         super().__init__()
         self.num_queries = num_queries
@@ -70,16 +72,32 @@ class DETRVAE(nn.Module):
 
         if not phase_bank_path:
             raise ValueError("phase_bank_path must be provided for phase-token prototype training.")
-        self.phase_bank = PhasePrototypeBank.from_npz(phase_bank_path)
-        if phase_num_prototypes and phase_num_prototypes != self.phase_bank.num_prototypes:
+        self.phase_bank = PhasePCABank.from_npz(phase_bank_path)
+        if phase_pca_dim and phase_pca_dim != self.phase_bank.pca_dim:
             raise ValueError(
-                f"phase_num_prototypes={phase_num_prototypes} does not match bank={self.phase_bank.num_prototypes}"
+                f"phase_pca_dim={phase_pca_dim} does not match bank={self.phase_bank.pca_dim}"
             )
-        prototype_actions = self.phase_bank.prototype_actions_flat.reshape(
-            self.phase_bank.num_prototypes, num_queries, state_dim
-        )
-        self.register_buffer("prototype_actions", prototype_actions.clone())
-        self.prototype_head = nn.Linear(hidden_dim, self.phase_bank.num_prototypes)
+        if self.phase_bank.action_dim != num_queries * state_dim:
+            raise ValueError(
+                f"phase bank action_dim={self.phase_bank.action_dim} does not match {num_queries}x{state_dim}"
+            )
+
+        self.register_buffer("pca_components", self.phase_bank.pca_components.clone())
+        self.register_buffer("pca_mean", self.phase_bank.pca_mean.clone())
+        self.register_buffer("pca_coord_mean", self.phase_bank.pca_coord_mean.clone())
+        self.register_buffer("pca_coord_std", self.phase_bank.pca_coord_std.clone())
+        self.register_buffer("residual_mean", self.phase_bank.residual_mean.clone())
+        self.register_buffer("residual_std", self.phase_bank.residual_std.clone())
+
+        pca_layers = []
+        in_dim = hidden_dim
+        hidden_dim_pca = int(pca_head_hidden_dim)
+        depth = max(int(pca_head_depth), 1)
+        for _ in range(depth - 1):
+            pca_layers.extend([nn.Linear(in_dim, hidden_dim_pca), nn.ReLU(inplace=True)])
+            in_dim = hidden_dim_pca
+        pca_layers.append(nn.Linear(in_dim, self.phase_bank.pca_dim))
+        self.pca_head = nn.Sequential(*pca_layers)
         self.phase_token_embed = nn.Embedding(1, hidden_dim)
         self.phase_pos_embed = nn.Embedding(1, hidden_dim)
 
@@ -106,6 +124,18 @@ class DETRVAE(nn.Module):
         phase_token = self.phase_token_embed.weight.unsqueeze(1).repeat(1, batch_size, 1).to(device)
         phase_pos = self.phase_pos_embed.weight.unsqueeze(1).repeat(1, batch_size, 1).to(device)
         return phase_token, phase_pos
+
+    def normalize_pca_coords(self, coords):
+        return (coords - self.pca_coord_mean) / self.pca_coord_std
+
+    def denormalize_pca_coords(self, coords_norm):
+        return coords_norm * self.pca_coord_std + self.pca_coord_mean
+
+    def normalize_residual(self, residual):
+        return (residual - self.residual_mean) / self.residual_std
+
+    def denormalize_residual(self, residual_norm):
+        return residual_norm * self.residual_std + self.residual_mean
 
     def forward(self, qpos, image, env_state=None, actions=None, is_pad=None):
         is_training = actions is not None
@@ -159,25 +189,32 @@ class DETRVAE(nn.Module):
                 encoder_prefix_pos_embed=phase_pos if self.use_phase_token else None,
                 return_prefix_memory=self.use_phase_token,
             )
+            if hs.dim() == 4:
+                hs = hs[-1]
         else:
             qpos_proj = self.input_proj_robot_state(qpos)
             env_proj = self.input_proj_env_state(env_state)
             transformer_input = torch.cat([qpos_proj, env_proj], axis=1)
             hs = self.transformer(transformer_input, None, None, self.query_embed.weight, self.pos.weight)[0]
+            if hs.dim() == 4:
+                hs = hs[-1]
             phase_memory = hs.mean(dim=1, keepdim=True).transpose(0, 1)
 
-        residual = self.residual_head(hs)
+        residual_norm = self.residual_head(hs)
         phase_feat = phase_memory[0]
-        prototype_logits = self.prototype_head(phase_feat)
-        alpha = torch.softmax(prototype_logits, dim=-1)
-        prototype_action = torch.einsum("bk,kqs->bqs", alpha, self.prototype_actions)
-        action_hat = prototype_action + residual
+        pca_coord_norm = self.pca_head(phase_feat)
+        pca_coord = self.denormalize_pca_coords(pca_coord_norm)
+        pca_recon_flat = torch.matmul(pca_coord, self.pca_components.T) + self.pca_mean.unsqueeze(0)
+        pca_recon_action = pca_recon_flat.view(batch_size, self.num_queries, -1)
+        residual = self.denormalize_residual(residual_norm)
+        action_hat = pca_recon_action + residual
         is_pad_hat = self.is_pad_head(hs)
 
         aux = {
-            "prototype_logits": prototype_logits,
-            "prototype_alpha": alpha,
-            "prototype_action": prototype_action,
+            "pca_coord_norm": pca_coord_norm,
+            "pca_coord": pca_coord,
+            "pca_recon_action": pca_recon_action,
+            "residual_norm": residual_norm,
             "residual_action": residual,
         }
         return action_hat, is_pad_hat, [mu, logvar], aux
@@ -254,9 +291,11 @@ def build(args):
         image_channels=args.image_channels,
         use_phase_token=args.use_phase_token,
         phase_bank_path=args.phase_bank_path,
-        phase_num_prototypes=args.phase_num_prototypes,
         predict_delta_qpos=getattr(args, "predict_delta_qpos", False),
         delta_qpos_scale=getattr(args, "delta_qpos_scale", 10.0),
+        phase_pca_dim=getattr(args, "phase_pca_dim", 16),
+        pca_head_hidden_dim=getattr(args, "pca_head_hidden_dim", 1024),
+        pca_head_depth=getattr(args, "pca_head_depth", 3),
     )
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("number of parameters: %.2fM" % (n_parameters / 1e6,))

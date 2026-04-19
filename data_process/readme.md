@@ -1,8 +1,8 @@
 ### Data Processing
 
-Processed tasks live under `data_process/data/task_*`.
+处理完成后的训练任务目录位于 `data_process/data/task_*`。
 
-Raw collected task layout:
+原始采样目录：
 
 ```text
 task_xxx/
@@ -11,68 +11,65 @@ task_xxx/
   states.csv
 ```
 
-Final training-ready layout:
+训练可用目录：
 
 ```text
 task_xxx/
   four_channel/
   states_filtered.csv
-  phase_proto_targets.npz
+  phase_pca16_targets.npz
 ```
 
-## Recommended entrypoint
+## 推荐入口
 
-Run preprocessing from the project root:
+从项目根目录运行：
 
 ```powershell
 python prepare_act_data.py
 ```
 
-This pipeline:
+这条链路会：
 
-1. cleans `states.csv` into `states_clean.csv`
-2. synchronizes `states_clean.csv`, `rgb/`, and `depth/`
-3. builds `depth_normalized/` and `four_channel/`
-4. amplifies gripper motion in `j10` around the dataset mean
-5. validates the final training files
+1. 清洗 `states.csv`
+2. 对齐状态、RGB、Depth
+3. 生成 `depth_normalized/` 和 `four_channel/`
+4. 放大夹爪关节幅值
+5. 校验最终训练文件
 
-The final validation checks:
+最终校验包括：
 
-- `states_filtered.csv` exists and has `frame,j1,j2,j3,j4,j5,j10`
-- `frame` is continuous from `0..N-1`
-- `four_channel/*.png` matches the CSV frame index exactly
-- each four-channel image is `480x640x4 uint8`
-- joint values stay inside the fixed physical limits
+- `states_filtered.csv` 存在并包含 `frame,j1,j2,j3,j4,j5,j10`
+- `frame` 连续
+- `four_channel/*.png` 与 CSV 帧号严格对应
+- 每张图是 `480x640x4`
+- 关节值在固定物理范围内
 
-Tasks that already contain `states_filtered.csv` and `four_channel/` are treated as final-only tasks and still participate in validation.
+## PCA 正交分解监督
 
-## Phase-prototype targets
+当前训练主线要求离线的 `PCA正交分解方法-16维` 监督文件。
 
-The new training path also expects offline phase-prototype supervision:
-
-```powershell
-python tools/build_phase_prototype_targets.py --data-root data_process/data
-```
-
-This script:
-
-- fits PCA on flattened `10x6 -> 60D` action targets
-- keeps the subspace that explains `85%` variance by default
-- clusters that PCA space into prototype centers
-- solves the target mixture coefficients `alpha_tgt`
-- writes:
-  - one global bank file under `data/_phase_proto/`
-  - one `phase_proto_targets.npz` per task
-
-Each `phase_proto_targets.npz` contains:
+每个任务里的 `phase_pca16_targets.npz` 包含：
 
 - `frame_index`
-- `alpha_tgt`
-- `prototype_tgt`
+- `pca_coord_tgt`
+- `pca_recon_tgt`
 - `residual_tgt`
 
-## Internal modules
+全局 bank 在：
 
-- `data_process_1.py`: state/image synchronization, smoothing, static-frame filtering, frame reindexing
-- `data_process_2.py`: strict RGB/depth matching and `four_channel/*.png` generation
-- `data_loader.py`: strict training-time alignment between `states_filtered.csv`, `four_channel/*.png`, and `phase_proto_targets.npz`
+```text
+data/_phase_pca16/phase_pca16_bank.npz
+```
+
+bank 中包含：
+
+- `pca_mean`
+- `pca_components`
+- `pca_coord_mean/std`
+- `residual_mean/std`
+
+`data_loader.py` 会严格对齐：
+
+- `states_filtered.csv`
+- `four_channel/*.png`
+- `phase_pca16_targets.npz`

@@ -40,9 +40,9 @@ def get_args_parser():
 
     parser.add_argument("--use_phase_token", default=True, type=bool)
     parser.add_argument("--phase_bank_path", default="", type=str)
-    parser.add_argument("--phase_num_prototypes", default=16, type=int)
     parser.add_argument("--phase_pca_dim", default=0, type=int)
-    parser.add_argument("--phase_pca_var_ratio", default=0.85, type=float)
+    parser.add_argument("--pca_head_hidden_dim", default=1024, type=int)
+    parser.add_argument("--pca_head_depth", default=3, type=int)
 
     parser.add_argument("--masks", action="store_true")
     parser.add_argument("--eval", action="store_true")

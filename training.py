@@ -57,7 +57,7 @@ def init_model_and_optimizer(config):
         "lr_backbone": config.LR_BACKBONE,
         "weight_decay": config.WEIGHT_DECAY,
         "kl_weight": config.KL_WEIGHT,
-        "prototype_loss_weight": config.PROTOTYPE_LOSS_WEIGHT,
+        "pca_coord_loss_weight": config.PCA_COORD_LOSS_WEIGHT,
         "residual_loss_weight": config.RESIDUAL_LOSS_WEIGHT,
         "recon_loss_weight": config.RECON_LOSS_WEIGHT,
         **config.MODEL_PARAMS,
@@ -80,9 +80,9 @@ def train_one_epoch(model, train_loader, optimizer, epoch, config, logger):
     total_batches = len(train_loader)
     pbar = tqdm(enumerate(train_loader), total=total_batches, desc=f"Train Epoch {epoch}")
     for batch_idx, batch in pbar:
-        imgs, currs, futures, alpha_tgts, residual_tgts, prototype_tgts, obsts = batch
-        imgs, currs, futures, alpha_tgts, residual_tgts, prototype_tgts = move_tensor_batch_to_device(
-            (imgs, currs, futures, alpha_tgts, residual_tgts, prototype_tgts), device
+        imgs, currs, futures, pca_coord_tgts, residual_tgts, pca_recon_tgts, obsts = batch
+        imgs, currs, futures, pca_coord_tgts, residual_tgts, pca_recon_tgts = move_tensor_batch_to_device(
+            (imgs, currs, futures, pca_coord_tgts, residual_tgts, pca_recon_tgts), device
         )
 
         optimizer.zero_grad()
@@ -91,7 +91,7 @@ def train_one_epoch(model, train_loader, optimizer, epoch, config, logger):
             loss_dict = model(
                 qpos=currs,
                 image=imgs,
-                alpha_targets=alpha_tgts,
+                pca_coord_targets=pca_coord_tgts,
                 residual_targets=residual_tgts,
                 actions=futures,
                 is_pad=is_pad,
@@ -138,18 +138,18 @@ def validate(model, val_loader, config, logger, epoch, is_obst=False):
     pbar = tqdm(enumerate(val_loader), total=total_batches, desc=f"Val (Obst={is_obst}) Epoch")
     with torch.no_grad():
         for _, batch in pbar:
-            imgs, currs, futures, alpha_tgts, residual_tgts, prototype_tgts, obsts = batch
+            imgs, currs, futures, pca_coord_tgts, residual_tgts, pca_recon_tgts, obsts = batch
             mask = obsts.squeeze(1).bool() if is_obst else ~obsts.squeeze(1).bool()
             if mask.sum() == 0:
                 continue
             imgs = imgs[mask]
             currs = currs[mask]
             futures = futures[mask]
-            alpha_tgts = alpha_tgts[mask]
+            pca_coord_tgts = pca_coord_tgts[mask]
             residual_tgts = residual_tgts[mask]
 
-            imgs, currs, futures, alpha_tgts, residual_tgts = move_tensor_batch_to_device(
-                (imgs, currs, futures, alpha_tgts, residual_tgts), device
+            imgs, currs, futures, pca_coord_tgts, residual_tgts = move_tensor_batch_to_device(
+                (imgs, currs, futures, pca_coord_tgts, residual_tgts), device
             )
 
             if config.POLICY_CLASS == "ACTPolicy":
@@ -157,7 +157,7 @@ def validate(model, val_loader, config, logger, epoch, is_obst=False):
                 loss_dict = model(
                     qpos=currs,
                     image=imgs,
-                    alpha_targets=alpha_tgts,
+                    pca_coord_targets=pca_coord_tgts,
                     residual_targets=residual_tgts,
                     actions=futures,
                     is_pad=is_pad,
@@ -217,7 +217,7 @@ def main():
     logger.info(f"===== 实验目录: {cfg.EXP_LOG_DIR} =====")
     val_has_obstacle = bool(getattr(val_loader.dataset, "split_has_obstacle_samples", False))
     tracked_metric_keys = (
-        ["loss", "recon_l1", "residual_l1", "prototype_mse", "kl"]
+        ["loss", "recon_l1", "residual_l1", "pca_coord_mse", "kl"]
         if cfg.POLICY_CLASS == "ACTPolicy"
         else ["loss", "mse"]
     )

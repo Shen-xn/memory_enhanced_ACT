@@ -11,7 +11,7 @@ from act.detr.main import build_ACT_model_and_optimizer, build_CNNMLP_model_and_
 
 
 class ACTPolicy(nn.Module):
-    """Main CVAE ACT policy with phase-token prototype-residual supervision."""
+    """Main CVAE ACT policy with phase-token PCA-residual supervision."""
 
     def __init__(self, args_override, device=None):
         super().__init__()
@@ -19,7 +19,7 @@ class ACTPolicy(nn.Module):
         self.model = model
         self.optimizer = optimizer
         self.kl_weight = float(args_override["kl_weight"])
-        self.prototype_loss_weight = float(args_override.get("prototype_loss_weight", 0.1))
+        self.pca_coord_loss_weight = float(args_override.get("pca_coord_loss_weight", 0.1))
         self.residual_loss_weight = float(args_override.get("residual_loss_weight", 1.0))
         self.recon_loss_weight = float(args_override.get("recon_loss_weight", 1.0))
         print(f"KL Weight {self.kl_weight}")
@@ -66,7 +66,7 @@ class ACTPolicy(nn.Module):
         self,
         qpos,
         image,
-        alpha_targets=None,
+        pca_coord_targets=None,
         residual_targets=None,
         actions=None,
         is_pad=None,
@@ -85,19 +85,24 @@ class ACTPolicy(nn.Module):
             valid_mask = (~is_pad).unsqueeze(-1)
 
             recon_l1 = (F.l1_loss(actions, action_hat, reduction="none") * valid_mask).mean()
-            residual_l1 = (F.l1_loss(aux["residual_action"], residual_targets, reduction="none") * valid_mask).mean()
-            prototype_mse = F.mse_loss(aux["prototype_alpha"], alpha_targets)
+            pca_coord_targets_norm = self.model.normalize_pca_coords(pca_coord_targets)
+            residual_targets_norm = self.model.normalize_residual(residual_targets)
+
+            residual_l1 = (
+                F.l1_loss(aux["residual_norm"], residual_targets_norm, reduction="none") * valid_mask
+            ).mean()
+            pca_coord_mse = F.mse_loss(aux["pca_coord_norm"], pca_coord_targets_norm)
 
             loss_dict = {
                 "recon_l1": recon_l1,
                 "residual_l1": residual_l1,
-                "prototype_mse": prototype_mse,
+                "pca_coord_mse": pca_coord_mse,
                 "kl": total_kld[0],
             }
             loss_dict["loss"] = (
                 loss_dict["recon_l1"] * self.recon_loss_weight
                 + loss_dict["residual_l1"] * self.residual_loss_weight
-                + loss_dict["prototype_mse"] * self.prototype_loss_weight
+                + loss_dict["pca_coord_mse"] * self.pca_coord_loss_weight
                 + loss_dict["kl"] * self.kl_weight
             )
             return loss_dict
