@@ -31,6 +31,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=int(os.environ.get("EPOCHS", "25")))
     parser.add_argument("--batch-size", type=int, default=int(os.environ.get("BATCH_SIZE", "16")))
     parser.add_argument("--num-workers", type=int, default=int(os.environ.get("NUM_WORKERS", "16")))
+    parser.add_argument("--log-print-freq", type=int, default=int(os.environ.get("LOG_PRINT_FREQ", "608")))
     parser.add_argument("--lr", default=os.environ.get("LR", "1e-5"))
     parser.add_argument("--lr-backbone", default=os.environ.get("LR_BACKBONE", "1e-6"))
     parser.add_argument("--kl-weight", default=os.environ.get("KL_WEIGHT", "1.0"))
@@ -107,6 +108,8 @@ def command_for_experiment(args, root: Path, data_root: Path, log_root: Path, ex
         str(args.batch_size),
         "--num-workers",
         str(args.num_workers),
+        "--log-print-freq",
+        str(args.log_print_freq),
         "--lr",
         str(args.lr),
         "--lr-backbone",
@@ -203,6 +206,7 @@ def main() -> int:
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "num_workers": args.num_workers,
+        "log_print_freq": args.log_print_freq,
         "lr": args.lr,
         "lr_backbone": args.lr_backbone,
         "kl_weight": args.kl_weight,
