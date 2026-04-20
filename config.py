@@ -86,11 +86,11 @@ class Config:
         # Offline supervision files used only when USE_PHASE_PCA_SUPERVISION=True.
         # These filenames and paths are tied to preprocessing output.
         #   phase_pca16_targets.npz + _phase_pca16/phase_pca16_bank.npz
-        self.PHASE_TARGETS_FILENAME = "phase_pca16_targets.npz"
+        self.PHASE_TARGETS_FILENAME = "phase_pca8_targets.npz"
         self.PHASE_BANK_PATH = os.path.join(
             self.DATA_ROOT,
-            "_phase_pca16",
-            "phase_pca16_bank.npz",
+            "_phase_pca8",
+            "phase_pca8_bank.npz",
         )
 
     def _init_optimization(self):
@@ -100,7 +100,7 @@ class Config:
         # Safe to tune during experiments. No need to rebuild data.
         self.NUM_EPOCHS = 40
         self.BATCH_SIZE = 16
-        self.NUM_WORKERS = 8
+        self.NUM_WORKERS = 16
 
         self.LR = 1e-5
         self.LR_BACKBONE = 1e-6
@@ -118,7 +118,7 @@ class Config:
         # + KL_WEIGHT * kl
         self.RECON_LOSS_WEIGHT = 1.0
         self.RESIDUAL_LOSS_WEIGHT = 1.0
-        self.PCA_COORD_LOSS_WEIGHT = 0.2
+        self.PCA_COORD_LOSS_WEIGHT = 1.0
 
     def _init_logging(self):
         # Logging / checkpoint cadence. Safe to edit.
@@ -167,7 +167,7 @@ class Config:
         # - PCA head predicts 16D orthogonal coordinates
         # - residual head predicts all-joint residual actions
         self.USE_PHASE_TOKEN = True
-        self.PHASE_PCA_DIM = 16
+        self.PHASE_PCA_DIM = 8
 
         # PCA head is intentionally deeper than the residual head because
         # mapping image/state context -> low-dimensional orthogonal coordinates
