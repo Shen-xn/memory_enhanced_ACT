@@ -219,10 +219,15 @@ python scripts/run_paper_experiments.py \
   --epochs 25 \
   --batch-size 16 \
   --num-workers 16 \
+  --log-print-freq 2000 \
   --qpos-noise-std 2.0
 ```
 
 `scripts/run_paper_experiments.sh` is kept as a simple shell fallback, but the Python runner is the preferred paper-run entry point because it writes a global summary and per-experiment stdout logs.
+
+`--log-print-freq` controls how often intra-epoch batch metrics are printed and appended to `metrics.jsonl`. The Python runner defaults it to `2000`, so paper-run logs stay readable while epoch summaries and validation metrics are still recorded every epoch.
+
+The Python runner disables tqdm progress bars by default because captured progress bars can write one line per batch into `runner_logs/*_stdout.log`. If you want live progress bars for a short debug run, add `--show-progress`.
 
 The Python runner is resumable. If the process is interrupted, run the same
 command with the same `--run-root` again:

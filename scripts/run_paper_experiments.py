@@ -41,6 +41,11 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--qpos-noise-clip", default=os.environ.get("QPOS_NOISE_CLIP", "5.0"))
     parser.add_argument("--python", default=sys.executable, help="Python executable used to launch training.py.")
     parser.add_argument(
+        "--show-progress",
+        action="store_true",
+        help="Show tqdm progress bars. Disabled by default to keep runner logs readable.",
+    )
+    parser.add_argument(
         "--fresh",
         action="store_true",
         help="Do not resume or skip existing experiment directories. Existing outputs may be overwritten/appended.",
@@ -119,6 +124,8 @@ def command_for_experiment(args, root: Path, data_root: Path, log_root: Path, ex
         "--qpos-input-noise-clip-std",
         str(args.qpos_noise_clip),
     ]
+    if not args.show_progress:
+        cmd.append("--disable-progress")
     dim = exp["dim"]
     if dim is not None:
         cmd.extend(
@@ -184,7 +191,10 @@ def main() -> int:
     runner_log_root = run_root / "runner_logs"
     exp_log_root.mkdir(parents=True, exist_ok=True)
     runner_log_root.mkdir(parents=True, exist_ok=True)
-    validate_inputs(data_root)
+    if args.dry_run:
+        print(f"[runner] dry-run DATA_ROOT={data_root}")
+    else:
+        validate_inputs(data_root)
 
     run_config = {
         "data_root": str(data_root),

@@ -53,6 +53,8 @@ def build_argparser():
     parser.add_argument("--num-epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--log-print-freq", type=int, default=None)
+    parser.add_argument("--disable-progress", action="store_true", help="Disable tqdm progress bars.")
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--lr-backbone", type=float, default=None)
     parser.add_argument("--kl-weight", type=float, default=None)
@@ -78,6 +80,8 @@ def apply_cli_overrides(config, args):
     if args.resume_ckpt_path:
         config.TRAIN_MODE = "resume"
         config.RESUME_CKPT_PATH = args.resume_ckpt_path
+    if args.disable_progress:
+        config.DISABLE_PROGRESS = True
 
     if args.method == "baseline":
         config.USE_PHASE_PCA_SUPERVISION = False
@@ -94,6 +98,7 @@ def apply_cli_overrides(config, args):
         "NUM_EPOCHS": args.num_epochs,
         "BATCH_SIZE": args.batch_size,
         "NUM_WORKERS": args.num_workers,
+        "LOG_PRINT_FREQ": args.log_print_freq,
         "LR": args.lr,
         "LR_BACKBONE": args.lr_backbone,
         "KL_WEIGHT": args.kl_weight,
@@ -184,7 +189,12 @@ def train_one_epoch(model, train_loader, optimizer, epoch, config, logger):
     train_metrics_list = []
     train_curve_points = []
     total_batches = len(train_loader)
-    pbar = tqdm(enumerate(train_loader), total=total_batches, desc=f"Train Epoch {epoch}")
+    pbar = tqdm(
+        enumerate(train_loader),
+        total=total_batches,
+        desc=f"Train Epoch {epoch}",
+        disable=getattr(config, "DISABLE_PROGRESS", False),
+    )
     for batch_idx, batch in pbar:
         imgs, currs, futures, pca_coord_tgts, residual_tgts, pca_recon_tgts, obsts = batch
         imgs, currs, futures, pca_coord_tgts, residual_tgts, pca_recon_tgts = move_tensor_batch_to_device(
@@ -241,7 +251,12 @@ def validate(model, val_loader, config, logger, epoch, is_obst=False):
     model.eval()
     val_metrics_list = []
     total_batches = len(val_loader)
-    pbar = tqdm(enumerate(val_loader), total=total_batches, desc=f"Val (Obst={is_obst}) Epoch")
+    pbar = tqdm(
+        enumerate(val_loader),
+        total=total_batches,
+        desc=f"Val (Obst={is_obst}) Epoch",
+        disable=getattr(config, "DISABLE_PROGRESS", False),
+    )
     with torch.no_grad():
         for _, batch in pbar:
             imgs, currs, futures, pca_coord_tgts, residual_tgts, pca_recon_tgts, obsts = batch
