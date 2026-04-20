@@ -47,6 +47,7 @@ def build_argparser():
         ),
     )
     parser.add_argument("--data-root", default="", help="Override cfg.DATA_ROOT.")
+    parser.add_argument("--log-root", default="", help="Override cfg.LOG_ROOT.")
     parser.add_argument("--exp-name", default="", help="Override cfg.EXP_NAME.")
     parser.add_argument("--num-epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
@@ -69,6 +70,8 @@ def build_argparser():
 def apply_cli_overrides(config, args):
     if args.data_root:
         config.DATA_ROOT = args.data_root
+    if args.log_root:
+        config.LOG_ROOT = args.log_root
     if args.exp_name:
         config.EXP_NAME = args.exp_name
 

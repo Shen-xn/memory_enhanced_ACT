@@ -174,12 +174,12 @@ image/qpos -> visual encoder with phase token -> PCA head -> pca_recon action
 
 The main transformer decoder, query embedding, `is_pad_head`, and residual head are not used for the action path. Decoder-side parameters are frozen so training is faster and the ablation is structurally clean.
 
-Run all seven paper experiments serially:
+Run all seven paper experiments serially with a dedicated run folder:
 
 ```bash
 cd /home/ubuntu/code_projects/memory_enhanced_act
 export DATA_ROOT=/home/ubuntu/code_projects/memory_enhanced_act/data_process/data
-bash scripts/run_paper_experiments.sh
+python scripts/run_paper_experiments.py
 ```
 
 The script runs:
@@ -192,11 +192,37 @@ The script runs:
 - `paper_pca16only_e25`
 - `paper_pca32only_e25`
 
-You can override common hyperparameters through env vars, for example:
+Outputs are stored outside the default `log/` tree:
+
+```text
+paper_runs/run_YYYYMMDD_HHMMSS/
+  runner_config.json
+  runner_summary.json
+  runner_logs/
+    01_paper_baseline_e25_stdout.log
+    ...
+  experiments/
+    paper_baseline_e25/
+      config.json
+      metrics.jsonl
+      train_paper_baseline_e25.log
+      ckpt_epoch_*.pth
+      best_model.pth
+    ...
+```
+
+You can override common hyperparameters through CLI or env vars, for example:
 
 ```bash
-EPOCHS=25 BATCH_SIZE=16 QPOS_NOISE_STD=2.0 bash scripts/run_paper_experiments.sh
+python scripts/run_paper_experiments.py \
+  --data-root /home/ubuntu/code_projects/memory_enhanced_act/data_process/data \
+  --epochs 25 \
+  --batch-size 16 \
+  --num-workers 16 \
+  --qpos-noise-std 2.0
 ```
+
+`scripts/run_paper_experiments.sh` is kept as a simple shell fallback, but the Python runner is the preferred paper-run entry point because it writes a global summary and per-experiment stdout logs.
 
 ## Loss Definitions
 
