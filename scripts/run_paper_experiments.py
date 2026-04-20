@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -39,6 +40,11 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--qpos-noise-std", default=os.environ.get("QPOS_NOISE_STD", "2.0"))
     parser.add_argument("--qpos-noise-clip", default=os.environ.get("QPOS_NOISE_CLIP", "5.0"))
     parser.add_argument("--python", default=sys.executable, help="Python executable used to launch training.py.")
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Do not resume or skip existing experiment directories. Existing outputs may be overwritten/appended.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running them.")
     return parser
 
@@ -128,6 +134,27 @@ def command_for_experiment(args, root: Path, data_root: Path, log_root: Path, ex
     return cmd
 
 
+def checkpoint_epoch(path: Path) -> int:
+    match = re.fullmatch(r"ckpt_epoch_(\d+)\.pth", path.name)
+    return int(match.group(1)) if match else -1
+
+
+def find_latest_checkpoint(exp_dir: Path) -> tuple[Path | None, int]:
+    checkpoints = sorted(
+        [path for path in exp_dir.glob("ckpt_epoch_*.pth") if checkpoint_epoch(path) >= 0],
+        key=checkpoint_epoch,
+    )
+    if not checkpoints:
+        return None, 0
+    latest = checkpoints[-1]
+    return latest, checkpoint_epoch(latest)
+
+
+def is_experiment_complete(exp_dir: Path, target_epochs: int) -> bool:
+    latest, epoch = find_latest_checkpoint(exp_dir)
+    return latest is not None and epoch >= target_epochs and (exp_dir / "best_model.pth").exists()
+
+
 def stream_process(cmd: list[str], log_path: Path, cwd: Path) -> int:
     with log_path.open("w", encoding="utf-8", buffering=1) as log_file:
         log_file.write("$ " + " ".join(cmd) + "\n")
@@ -184,10 +211,50 @@ def main() -> int:
     summary = []
     for index, exp in enumerate(EXPERIMENTS, start=1):
         exp_name = exp["name"].format(epochs=args.epochs)
+        exp_dir = exp_log_root / exp_name
         cmd = command_for_experiment(args, root, data_root, exp_log_root, exp)
+        resume_ckpt = None
+        resume_epoch = 0
+        if not args.fresh:
+            if is_experiment_complete(exp_dir, args.epochs):
+                latest_ckpt, latest_epoch = find_latest_checkpoint(exp_dir)
+                log_path = runner_log_root / f"{index:02d}_{exp_name}_skipped.log"
+                message = {
+                    "event": "skip_complete",
+                    "experiment": exp_name,
+                    "latest_checkpoint": str(latest_ckpt),
+                    "latest_epoch": latest_epoch,
+                    "target_epochs": args.epochs,
+                }
+                log_path.write_text(json.dumps(message, ensure_ascii=False, indent=2), encoding="utf-8")
+                item = {
+                    "index": index,
+                    "name": exp_name,
+                    "method": exp["method"],
+                    "dim": exp["dim"],
+                    "return_code": 0,
+                    "status": "skipped_complete",
+                    "resume_from_epoch": latest_epoch,
+                    "stdout_log": str(log_path),
+                    "experiment_dir": str(exp_dir),
+                }
+                summary.append(item)
+                (run_root / "runner_summary.json").write_text(
+                    json.dumps(summary, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                print("=" * 96)
+                print(f"[runner] {index}/{len(EXPERIMENTS)} skip complete: {exp_name} epoch={latest_epoch}")
+                continue
+
+            resume_ckpt, resume_epoch = find_latest_checkpoint(exp_dir)
+            if resume_ckpt is not None:
+                cmd.extend(["--resume-ckpt-path", str(resume_ckpt)])
         log_path = runner_log_root / f"{index:02d}_{exp_name}_stdout.log"
         print("=" * 96)
         print(f"[runner] {index}/{len(EXPERIMENTS)} start: {exp_name}")
+        if resume_ckpt is not None:
+            print(f"[runner] resume: {resume_ckpt} epoch={resume_epoch}")
         print("[runner] command:", " ".join(cmd))
         if args.dry_run:
             return_code = 0
@@ -199,8 +266,11 @@ def main() -> int:
             "method": exp["method"],
             "dim": exp["dim"],
             "return_code": return_code,
+            "status": "finished" if return_code == 0 else "failed",
+            "resume_from_checkpoint": str(resume_ckpt) if resume_ckpt is not None else "",
+            "resume_from_epoch": resume_epoch,
             "stdout_log": str(log_path),
-            "experiment_dir": str(exp_log_root / exp_name),
+            "experiment_dir": str(exp_dir),
         }
         summary.append(item)
         (run_root / "runner_summary.json").write_text(

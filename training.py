@@ -49,6 +49,7 @@ def build_argparser():
     parser.add_argument("--data-root", default="", help="Override cfg.DATA_ROOT.")
     parser.add_argument("--log-root", default="", help="Override cfg.LOG_ROOT.")
     parser.add_argument("--exp-name", default="", help="Override cfg.EXP_NAME.")
+    parser.add_argument("--resume-ckpt-path", default="", help="Resume from a checkpoint path.")
     parser.add_argument("--num-epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
@@ -74,6 +75,9 @@ def apply_cli_overrides(config, args):
         config.LOG_ROOT = args.log_root
     if args.exp_name:
         config.EXP_NAME = args.exp_name
+    if args.resume_ckpt_path:
+        config.TRAIN_MODE = "resume"
+        config.RESUME_CKPT_PATH = args.resume_ckpt_path
 
     if args.method == "baseline":
         config.USE_PHASE_PCA_SUPERVISION = False

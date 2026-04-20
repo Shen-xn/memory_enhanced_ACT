@@ -224,6 +224,21 @@ python scripts/run_paper_experiments.py \
 
 `scripts/run_paper_experiments.sh` is kept as a simple shell fallback, but the Python runner is the preferred paper-run entry point because it writes a global summary and per-experiment stdout logs.
 
+The Python runner is resumable. If the process is interrupted, run the same
+command with the same `--run-root` again:
+
+```bash
+python scripts/run_paper_experiments.py \
+  --data-root /home/ubuntu/code_projects/memory_enhanced_act/data_process/data \
+  --run-root /home/ubuntu/code_projects/memory_enhanced_act/paper_runs/final_320_tasks_e25
+```
+
+Resume behavior:
+
+- If an experiment already has `ckpt_epoch_25.pth` and `best_model.pth`, it is skipped.
+- If it has a partial checkpoint such as `ckpt_epoch_7.pth`, the runner automatically passes `--resume-ckpt-path` and continues from epoch 8.
+- If you really want to ignore existing checkpoints and rerun, add `--fresh`.
+
 ## Loss Definitions
 
 Baseline:
