@@ -39,7 +39,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--pca-coord-loss-weight", default=os.environ.get("PCA_COORD_LOSS_WEIGHT", "1.0"))
     parser.add_argument("--residual-loss-weight", default=os.environ.get("RESIDUAL_LOSS_WEIGHT", "1.0"))
     parser.add_argument("--qpos-noise-std", default=os.environ.get("QPOS_NOISE_STD", "2.0"))
-    parser.add_argument("--qpos-noise-clip", default=os.environ.get("QPOS_NOISE_CLIP", "5.0"))
+    parser.add_argument("--qpos-noise-clip", default=os.environ.get("QPOS_NOISE_CLIP", "4.0"))
     parser.add_argument("--python", default=sys.executable, help="Python executable used to launch training.py.")
     parser.add_argument(
         "--show-progress",
