@@ -4,7 +4,7 @@ This branch keeps three compatible training / export modes:
 
 - `baseline`: native ACT, no Phase-PCA supervision.
 - `pca-residual`: Phase-PCA coordinate head plus residual action head.
-- `pca-only`: Phase-PCA coordinate head only, no residual action head.
+- `pca-only`: strict encoder-only Phase-PCA coordinate head, no residual action head and no main decoder path.
 
 The current paper-run convention is:
 
@@ -165,6 +165,14 @@ python training.py \
   --exp-name paper_pca16only_e25 \
   --num-epochs 25
 ```
+
+In `pca-only`, the model uses:
+
+```text
+image/qpos -> visual encoder with phase token -> PCA head -> pca_recon action
+```
+
+The main transformer decoder, query embedding, `is_pad_head`, and residual head are not used for the action path. Decoder-side parameters are frozen so training is faster and the ablation is structurally clean.
 
 Run all seven paper experiments serially:
 

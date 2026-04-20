@@ -67,6 +67,7 @@ class Transformer(nn.Module):
         encoder_prefix_tokens=None,
         encoder_prefix_pos_embed=None,
         return_prefix_memory=False,
+        skip_decoder=False,
     ):
         prefix_len = 0
         prefix_memory = None
@@ -104,6 +105,11 @@ class Transformer(nn.Module):
             prefix_memory = memory[:prefix_len]
             decoder_memory = memory[prefix_len:]
             decoder_pos = pos_embed[prefix_len:]
+
+        if skip_decoder:
+            if return_prefix_memory:
+                return None, prefix_memory
+            return None
 
         hs = self.decoder(
             tgt,

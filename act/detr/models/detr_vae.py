@@ -73,6 +73,7 @@ class DETRVAE(nn.Module):
         # Baseline ACT still needs the action head. The switch only removes the
         # residual branch for PCA-supervised models.
         self.use_residual_action = bool(use_residual_action) or not self.use_phase_pca_supervision
+        self.pca_only_encoder_path = self.use_phase_pca_supervision and not self.use_residual_action
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
         self.residual_head = nn.Linear(hidden_dim, state_dim) if self.use_residual_action else None
         self.is_pad_head = nn.Linear(hidden_dim, 1)
@@ -131,6 +132,16 @@ class DETRVAE(nn.Module):
         self.register_buffer("pos_table", get_sinusoid_encoding_table(1 + 1 + num_queries, hidden_dim))
         self.latent_out_proj = nn.Linear(self.latent_dim, hidden_dim)
         self.additional_pos_embed = nn.Embedding(2, hidden_dim)
+        self._freeze_decoder_only_path()
+
+    def _freeze_decoder_only_path(self):
+        """Disable unused decoder-side parameters for strict PCA-only models."""
+        if not self.pca_only_encoder_path:
+            return
+        self.query_embed.requires_grad_(False)
+        self.is_pad_head.requires_grad_(False)
+        if hasattr(self.transformer, "decoder"):
+            self.transformer.decoder.requires_grad_(False)
 
     def _build_phase_token_inputs(self, batch_size, device):
         # Do not call `.to(device)` here: TorchScript tracing records the
@@ -216,13 +227,14 @@ class DETRVAE(nn.Module):
                 encoder_prefix_tokens=phase_token if self.use_phase_token else None,
                 encoder_prefix_pos_embed=phase_pos if self.use_phase_token else None,
                 return_prefix_memory=self.use_phase_token,
+                skip_decoder=self.pca_only_encoder_path,
             )
             if self.use_phase_token:
                 hs, phase_memory = transformer_output
             else:
                 hs = transformer_output
                 phase_memory = None
-            if hs.dim() == 4:
+            if hs is not None and hs.dim() == 4:
                 hs = hs[-1]
         else:
             qpos_proj = self.input_proj_robot_state(qpos)
@@ -256,7 +268,10 @@ class DETRVAE(nn.Module):
             pca_recon_action = None
             residual = residual_norm
             action_hat = residual
-        is_pad_hat = self.is_pad_head(hs)
+        if hs is None:
+            is_pad_hat = qpos.new_zeros((batch_size, self.num_queries, 1))
+        else:
+            is_pad_hat = self.is_pad_head(hs)
 
         aux = {
             "pca_coord_norm": pca_coord_norm,

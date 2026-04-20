@@ -185,7 +185,8 @@ class Config:
         # Only used when USE_PHASE_PCA_SUPERVISION=True.
         # True  = PCA-residual: final action is pca_recon + residual.
         # False = PCA-only: no residual head is created, no residual loss is used,
-        #         final action is pca_recon directly.
+        #         final action is pca_recon directly. The main transformer
+        #         decoder/query path is frozen and skipped in forward.
         # Baseline ignores this switch and remains native ACT.
         self.USE_RESIDUAL_ACTION = True
         self.PHASE_PCA_DIM = 8
