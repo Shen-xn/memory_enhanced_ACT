@@ -15,8 +15,9 @@ std::string JoinPath(const std::string& a, const std::string& b) {
 ActPipeline::ActPipeline(const std::string& deploy_dir, const std::string& device)
     : config_(LoadConfig(JoinPath(deploy_dir, "deploy_config.yml"))),
       device_(ParseDevice(device)),
-      act_module_(torch::jit::load(JoinPath(deploy_dir, "act_inference.pt"), device_)) {
+      act_module_(torch::jit::load(JoinPath(deploy_dir, "act_inference.pt"))) {
   act_module_.eval();
+  act_module_.to(device_);
 }
 
 std::vector<std::vector<float>> ActPipeline::Predict(

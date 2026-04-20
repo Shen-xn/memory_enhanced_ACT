@@ -30,7 +30,8 @@ class ActPipelinePy:
         self.deploy_dir = Path(deploy_dir)
         self.config = self._load_config(self.deploy_dir / "deploy_config.yml")
         self.device = self._parse_device(device)
-        self.act_module = torch.jit.load(str(self.deploy_dir / "act_inference.pt"), map_location=self.device).eval()
+        self.act_module = torch.jit.load(str(self.deploy_dir / "act_inference.pt"), map_location="cpu").eval()
+        self.act_module.to(self.device)
 
     def reset_memory(self) -> None:
         return None

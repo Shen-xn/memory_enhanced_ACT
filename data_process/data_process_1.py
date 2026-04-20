@@ -108,6 +108,8 @@ def process_depth_images(task_dir):
 
     print(f"[INFO] Processing depth images: {len(depth_paths)}")
     for path in tqdm(depth_paths):
+        if not os.path.exists(path):
+            continue
         img = np.array(Image.open(path), dtype=np.float32)
         img = np.clip(img, DEPTH_CLIP_MIN, DEPTH_CLIP_MAX)
         img = (img - DEPTH_CLIP_MIN) / (DEPTH_CLIP_MAX - DEPTH_CLIP_MIN) * 255
@@ -292,13 +294,17 @@ def delete_unused_images(task_dir, frame_list, delete_mode=False):
             continue
         files = natural_sort(glob.glob(os.path.join(img_dir, f"*{ext}")))
         for path in files:
+            if not os.path.exists(path):
+                continue
             num = int(re.findall(r"\d+", os.path.basename(path))[0])
             if delete_mode:
                 if num in frames:
-                    os.remove(path)
+                    if os.path.exists(path):
+                        os.remove(path)
             else:
                 if num not in frames:
-                    os.remove(path)
+                    if os.path.exists(path):
+                        os.remove(path)
 
 
 def rename_images_continuous(task_dir, total_frames):

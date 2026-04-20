@@ -44,7 +44,7 @@ JOINT_COLS = ["j1", "j2", "j3", "j4", "j5", "j10"]
 CSV_HEADER = ["frame", *JOINT_COLS]
 IMAGE_SHAPE = (480, 640, 4)
 GRIPPER_COL = "j10"
-GRIPPER_SCALE = 1.2
+GRIPPER_SCALE = 1.4
 GRIPPER_BACKUP_NAME = "states_filtered.pre_gripper_amp.csv"
 GRIPPER_META_NAME = "gripper_amplification.json"
 
@@ -165,6 +165,36 @@ def resolve_task_root(data_root: Path) -> Path:
 
 def has_raw_inputs(task_dir: Path) -> bool:
     return (task_dir / "states.csv").exists() and (task_dir / "rgb").exists() and (task_dir / "depth").exists()
+
+
+def count_frame_files(task_dir: Path, subdir: str, suffix: str) -> int:
+    directory = task_dir / subdir
+    if not directory.exists():
+        return 0
+    return len(list(directory.glob(f"*{suffix}")))
+
+
+def is_filter_stage_complete(task_dir: Path) -> bool:
+    """Return True when a task should not be filtered again.
+
+    This protects partially prepared datasets from a dangerous second pass:
+    once `states_filtered.csv` exists and RGB/depth/depth_normalized are already
+    aligned to it, raw synchronization/filtering should be skipped. The
+    four_channel stage can still be rebuilt safely afterward.
+    """
+    csv_path = task_dir / "states_filtered.csv"
+    if not csv_path.exists():
+        return False
+    try:
+        rows = len(pd.read_csv(csv_path))
+    except Exception:
+        return False
+    return (
+        rows > 0
+        and count_frame_files(task_dir, "rgb", ".jpg") == rows
+        and count_frame_files(task_dir, "depth", ".png") == rows
+        and count_frame_files(task_dir, "depth_normalized", ".png") == rows
+    )
 
 
 def parse_states_line(line: str) -> list[str]:
@@ -496,8 +526,18 @@ def run_prepare(args: argparse.Namespace) -> int:
     print(f"[INFO] found {len(tasks)} task directories")
 
     if not args.validate_only:
-        raw_tasks = [task_dir for task_dir in tasks if has_raw_inputs(task_dir)]
+        filter_done_tasks = [task_dir for task_dir in tasks if is_filter_stage_complete(task_dir)]
+        raw_tasks = [
+            task_dir
+            for task_dir in tasks
+            if has_raw_inputs(task_dir) and task_dir not in set(filter_done_tasks)
+        ]
         final_only_tasks = [task_dir for task_dir in tasks if not has_raw_inputs(task_dir)]
+        if filter_done_tasks:
+            print(
+                "[INFO] filter-complete task directories will not be filtered again: "
+                f"{len(filter_done_tasks)}"
+            )
         if final_only_tasks:
             print(
                 "[INFO] final-only task directories will be validated but not regenerated: "
@@ -523,9 +563,11 @@ def run_prepare(args: argparse.Namespace) -> int:
         # `data_process_2` is the point where RGB + normalized depth become the
         # stable BGRA training format consumed by the loader and deployment.
         step_start = print_step_banner(3, 5, "Rebuild four_channel images")
-        for task_dir in raw_tasks:
+        for task_dir in tasks:
+            if not (task_dir / "states_filtered.csv").exists():
+                continue
             data_process_2.process_single_task(str(task_dir))
-        print_step_done(step_start, f"rebuilt four_channel for {len(raw_tasks)} raw task(s)")
+        print_step_done(step_start, f"rebuilt four_channel for tasks with states_filtered.csv")
 
         # The gripper amplitude pass is intentionally after image rebuilding:
         # it only rewrites `states_filtered.csv`, not image files.

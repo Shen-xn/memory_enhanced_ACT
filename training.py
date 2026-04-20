@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 
 import numpy as np
@@ -21,6 +22,104 @@ from utils import (
     save_config_snapshot,
     setup_logger,
 )
+
+
+def str_to_bool(value):
+    if isinstance(value, bool):
+        return value
+    lowered = str(value).strip().lower()
+    if lowered in ("1", "true", "yes", "y", "on"):
+        return True
+    if lowered in ("0", "false", "no", "n", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"Expected boolean value, got {value!r}")
+
+
+def build_argparser():
+    parser = argparse.ArgumentParser(description="Train ACT / Phase-PCA ACT variants.")
+    parser.add_argument(
+        "--method",
+        choices=("config", "baseline", "pca-residual", "pca-only"),
+        default="config",
+        help=(
+            "Training variant. 'config' uses config.py as-is; baseline disables "
+            "Phase-PCA; pca-residual enables PCA+residual; pca-only removes residual head."
+        ),
+    )
+    parser.add_argument("--data-root", default="", help="Override cfg.DATA_ROOT.")
+    parser.add_argument("--exp-name", default="", help="Override cfg.EXP_NAME.")
+    parser.add_argument("--num-epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--lr-backbone", type=float, default=None)
+    parser.add_argument("--kl-weight", type=float, default=None)
+    parser.add_argument("--recon-loss-weight", type=float, default=None)
+    parser.add_argument("--pca-coord-loss-weight", type=float, default=None)
+    parser.add_argument("--residual-loss-weight", type=float, default=None)
+    parser.add_argument("--phase-pca-dim", type=int, default=None)
+    parser.add_argument("--phase-bank-path", default="")
+    parser.add_argument("--phase-targets-filename", default="")
+    parser.add_argument("--use-phase-token", type=str_to_bool, default=None)
+    parser.add_argument("--qpos-input-noise-std-pulse", type=float, default=None)
+    parser.add_argument("--qpos-input-noise-clip-std", type=float, default=None)
+    return parser
+
+
+def apply_cli_overrides(config, args):
+    if args.data_root:
+        config.DATA_ROOT = args.data_root
+    if args.exp_name:
+        config.EXP_NAME = args.exp_name
+
+    if args.method == "baseline":
+        config.USE_PHASE_PCA_SUPERVISION = False
+        config.USE_PHASE_TOKEN = False
+        config.USE_RESIDUAL_ACTION = True
+    elif args.method == "pca-residual":
+        config.USE_PHASE_PCA_SUPERVISION = True
+        config.USE_RESIDUAL_ACTION = True
+    elif args.method == "pca-only":
+        config.USE_PHASE_PCA_SUPERVISION = True
+        config.USE_RESIDUAL_ACTION = False
+
+    scalar_overrides = {
+        "NUM_EPOCHS": args.num_epochs,
+        "BATCH_SIZE": args.batch_size,
+        "NUM_WORKERS": args.num_workers,
+        "LR": args.lr,
+        "LR_BACKBONE": args.lr_backbone,
+        "KL_WEIGHT": args.kl_weight,
+        "RECON_LOSS_WEIGHT": args.recon_loss_weight,
+        "PCA_COORD_LOSS_WEIGHT": args.pca_coord_loss_weight,
+        "RESIDUAL_LOSS_WEIGHT": args.residual_loss_weight,
+        "PHASE_PCA_DIM": args.phase_pca_dim,
+        "QPOS_INPUT_NOISE_STD_PULSE": args.qpos_input_noise_std_pulse,
+        "QPOS_INPUT_NOISE_CLIP_STD": args.qpos_input_noise_clip_std,
+    }
+    for key, value in scalar_overrides.items():
+        if value is not None:
+            setattr(config, key, value)
+
+    if args.use_phase_token is not None:
+        config.USE_PHASE_TOKEN = bool(args.use_phase_token)
+
+    if args.phase_targets_filename:
+        config.PHASE_TARGETS_FILENAME = args.phase_targets_filename
+    elif config.USE_PHASE_PCA_SUPERVISION:
+        config.PHASE_TARGETS_FILENAME = f"phase_pca{int(config.PHASE_PCA_DIM)}_targets.npz"
+
+    if args.phase_bank_path:
+        config.PHASE_BANK_PATH = args.phase_bank_path
+    elif config.USE_PHASE_PCA_SUPERVISION:
+        config.PHASE_BANK_PATH = os.path.join(
+            config.DATA_ROOT,
+            f"_phase_pca{int(config.PHASE_PCA_DIM)}",
+            f"phase_pca{int(config.PHASE_PCA_DIM)}_bank.npz",
+        )
+
+    config.refresh_model_params()
+    return config
 
 
 def get_device(config):
@@ -186,6 +285,8 @@ def nan_metrics_like(metrics):
 
 
 def main():
+    args = build_argparser().parse_args()
+    apply_cli_overrides(cfg, args)
     resume_ckpt = prepare_run_config(cfg)
     set_global_seed(cfg.SEED, cfg.USE_CUDA)
 
@@ -200,6 +301,8 @@ def main():
         phase_targets_filename=cfg.PHASE_TARGETS_FILENAME,
         require_phase_targets=cfg.USE_PHASE_PCA_SUPERVISION,
         phase_pca_dim=cfg.PHASE_PCA_DIM,
+        qpos_input_noise_std_pulse=cfg.QPOS_INPUT_NOISE_STD_PULSE,
+        qpos_input_noise_clip_std=cfg.QPOS_INPUT_NOISE_CLIP_STD,
     )
 
     model, optimizer = init_model_and_optimizer(cfg)

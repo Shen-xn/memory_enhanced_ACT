@@ -6,8 +6,8 @@ Key design:
 - a phase token enters the visual transformer encoder only;
 - the decoder never cross-attends to the phase token;
 - the PCA branch predicts low-dimensional orthogonal coordinates;
-- the residual branch predicts all-joint residual actions;
-- final action = pca_recon + residual.
+- the residual branch is optional for PCA models;
+- final action = pca_recon + residual, or pca_recon for PCA-only.
 """
 from __future__ import annotations
 
@@ -49,6 +49,7 @@ class DETRVAE(nn.Module):
         image_channels,
         use_phase_token,
         use_phase_pca_supervision,
+        use_residual_action,
         phase_bank_path,
         predict_delta_qpos=False,
         delta_qpos_scale=10.0,
@@ -58,6 +59,7 @@ class DETRVAE(nn.Module):
     ):
         super().__init__()
         self.num_queries = num_queries
+        self.state_dim = state_dim
         self.camera_names = camera_names
         self.image_channels = image_channels
         self.predict_delta_qpos = bool(predict_delta_qpos)
@@ -68,8 +70,11 @@ class DETRVAE(nn.Module):
 
         self.use_phase_pca_supervision = bool(use_phase_pca_supervision)
         self.use_phase_token = bool(use_phase_token) and self.use_phase_pca_supervision
+        # Baseline ACT still needs the action head. The switch only removes the
+        # residual branch for PCA-supervised models.
+        self.use_residual_action = bool(use_residual_action) or not self.use_phase_pca_supervision
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
-        self.residual_head = nn.Linear(hidden_dim, state_dim)
+        self.residual_head = nn.Linear(hidden_dim, state_dim) if self.use_residual_action else None
         self.is_pad_head = nn.Linear(hidden_dim, 1)
         self.phase_bank = None
         self.pca_head = None
@@ -128,8 +133,13 @@ class DETRVAE(nn.Module):
         self.additional_pos_embed = nn.Embedding(2, hidden_dim)
 
     def _build_phase_token_inputs(self, batch_size, device):
-        phase_token = self.phase_token_embed.weight.unsqueeze(1).repeat(1, batch_size, 1).to(device)
-        phase_pos = self.phase_pos_embed.weight.unsqueeze(1).repeat(1, batch_size, 1).to(device)
+        # Do not call `.to(device)` here: TorchScript tracing records the
+        # concrete trace-time device and can force these tensors back to CPU
+        # when the exported model is later loaded on CUDA. The embedding
+        # weights already move with the module, so repeating them is enough.
+        del device
+        phase_token = self.phase_token_embed.weight.unsqueeze(1).repeat(1, batch_size, 1)
+        phase_pos = self.phase_pos_embed.weight.unsqueeze(1).repeat(1, batch_size, 1)
         return phase_token, phase_pos
 
     def normalize_pca_coords(self, coords):
@@ -223,7 +233,7 @@ class DETRVAE(nn.Module):
                 hs = hs[-1]
             phase_memory = hs.mean(dim=1, keepdim=True).transpose(0, 1)
 
-        residual_norm = self.residual_head(hs)
+        residual_norm = self.residual_head(hs) if self.residual_head is not None else None
         if self.use_phase_pca_supervision:
             if phase_memory is None:
                 raise RuntimeError("phase_memory is required when USE_PHASE_PCA_SUPERVISION is enabled.")
@@ -232,9 +242,15 @@ class DETRVAE(nn.Module):
             pca_coord = self.denormalize_pca_coords(pca_coord_norm)
             pca_recon_flat = torch.matmul(pca_coord, self.pca_components.T) + self.pca_mean.unsqueeze(0)
             pca_recon_action = pca_recon_flat.view(batch_size, self.num_queries, -1)
-            residual = self.denormalize_residual(residual_norm)
-            action_hat = pca_recon_action + residual
+            if self.use_residual_action:
+                residual = self.denormalize_residual(residual_norm)
+                action_hat = pca_recon_action + residual
+            else:
+                residual = None
+                action_hat = pca_recon_action
         else:
+            if residual_norm is None:
+                raise RuntimeError("baseline ACT requires residual/action head.")
             pca_coord_norm = None
             pca_coord = None
             pca_recon_action = None
@@ -323,6 +339,7 @@ def build(args):
         image_channels=args.image_channels,
         use_phase_token=args.use_phase_token,
         use_phase_pca_supervision=getattr(args, "use_phase_pca_supervision", True),
+        use_residual_action=getattr(args, "use_residual_action", True),
         phase_bank_path=args.phase_bank_path,
         predict_delta_qpos=getattr(args, "predict_delta_qpos", False),
         delta_qpos_scale=getattr(args, "delta_qpos_scale", 10.0),

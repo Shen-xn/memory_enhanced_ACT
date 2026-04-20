@@ -182,6 +182,8 @@ class ImitationDataset(Dataset):
         phase_targets_filename="phase_pca16_targets.npz",
         require_phase_targets=True,
         phase_pca_dim=16,
+        qpos_input_noise_std_pulse=0.0,
+        qpos_input_noise_clip_std=3.0,
     ):
         self.data_root = data_root
         self.future_steps = future_steps
@@ -196,6 +198,8 @@ class ImitationDataset(Dataset):
         self.phase_targets_filename = phase_targets_filename
         self.require_phase_targets = bool(require_phase_targets)
         self.phase_pca_dim = int(phase_pca_dim)
+        self.qpos_input_noise_std_pulse = float(qpos_input_noise_std_pulse)
+        self.qpos_input_noise_clip_std = float(qpos_input_noise_clip_std)
 
         if self.image_channels not in (3, 4):
             raise ValueError(f"image_channels must be 3 or 4, got {self.image_channels}")
@@ -203,6 +207,10 @@ class ImitationDataset(Dataset):
             raise ValueError(f"target_mode must be 'absolute' or 'delta', got {target_mode}")
         if self.target_mode == "delta" and self.delta_qpos_scale <= 0:
             raise ValueError("delta_qpos_scale must be > 0 when target_mode='delta'.")
+        if self.qpos_input_noise_std_pulse < 0:
+            raise ValueError("qpos_input_noise_std_pulse must be >= 0.")
+        if self.qpos_input_noise_clip_std <= 0:
+            raise ValueError("qpos_input_noise_clip_std must be > 0.")
 
         self.all_samples = self._load_all_samples()
         self._split_by_task_strict(train_ratio, seed)
@@ -489,6 +497,27 @@ class ImitationDataset(Dataset):
                 f"Limits min={jmin.tolist()} max={jmax.tolist()}. Examples: {bad_message}"
             )
 
+    def _augment_curr_qpos(self, curr_raw):
+        if self.mode != "train" or self.qpos_input_noise_std_pulse <= 0:
+            return curr_raw
+        noise = np.random.normal(
+            0.0,
+            self.qpos_input_noise_std_pulse,
+            size=curr_raw.shape,
+        ).astype(np.float32)
+        clip_abs = self.qpos_input_noise_std_pulse * self.qpos_input_noise_clip_std
+        noise = np.clip(noise, -clip_abs, clip_abs)
+        if self.normalize_joints:
+            return np.clip(curr_raw + noise, FIXED_JOINT_MIN, FIXED_JOINT_MAX)
+        return curr_raw + noise
+
+    def _encode_curr_qpos(self, curr_raw):
+        if self.normalize_joints:
+            jmin = self.joint_min_max["min"]
+            jrng = self.joint_min_max["rng"]
+            return (curr_raw - jmin) / jrng
+        return curr_raw.copy()
+
     def __len__(self):
         return len(self.samples)
 
@@ -502,7 +531,8 @@ class ImitationDataset(Dataset):
         img_np = select_image_channels(img_np, self.image_channels)
         img = torch.from_numpy(img_np.copy()).permute(2, 0, 1)
 
-        curr = torch.from_numpy(sample["curr"]).float()
+        curr_raw_aug = self._augment_curr_qpos(sample["curr_raw"])
+        curr = torch.from_numpy(self._encode_curr_qpos(curr_raw_aug)).float()
         future = torch.from_numpy(sample["future"]).float()
         pca_coord_tgt = torch.from_numpy(sample["pca_coord_tgt"]).float()
         residual_tgt = torch.from_numpy(sample["residual_tgt"]).float()
@@ -522,6 +552,8 @@ def get_data_loaders(
     phase_targets_filename="phase_pca16_targets.npz",
     require_phase_targets=True,
     phase_pca_dim=16,
+    qpos_input_noise_std_pulse=0.0,
+    qpos_input_noise_clip_std=3.0,
 ):
     train_dataset = ImitationDataset(
         data_root,
@@ -533,6 +565,8 @@ def get_data_loaders(
         phase_targets_filename=phase_targets_filename,
         require_phase_targets=require_phase_targets,
         phase_pca_dim=phase_pca_dim,
+        qpos_input_noise_std_pulse=qpos_input_noise_std_pulse,
+        qpos_input_noise_clip_std=qpos_input_noise_clip_std,
     )
     val_dataset = ImitationDataset(
         data_root,
@@ -545,6 +579,8 @@ def get_data_loaders(
         phase_targets_filename=phase_targets_filename,
         require_phase_targets=require_phase_targets,
         phase_pca_dim=phase_pca_dim,
+        qpos_input_noise_std_pulse=0.0,
+        qpos_input_noise_clip_std=qpos_input_noise_clip_std,
     )
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)

@@ -1,186 +1,304 @@
 # memory_enhanced_ACT
 
-当前仓库支持两条训练口径：
+This branch keeps three compatible training / export modes:
 
-1. **Baseline ACT**
-   - 不使用 phase token
-   - 不使用 PCA 离线监督
-   - 直接做标准 ACT 动作回归
+- `baseline`: native ACT, no Phase-PCA supervision.
+- `pca-residual`: Phase-PCA coordinate head plus residual action head.
+- `pca-only`: Phase-PCA coordinate head only, no residual action head.
 
-2. **PCA 正交分解方法**
-   - `phase token` 只进 encoder
-   - `phase token` 不给 decoder
-   - PCA 头预测 `16` 维正交坐标
-   - residual 头预测全关节残差
-   - 最终动作：`pca_recon + residual`
+The current paper-run convention is:
 
-旧的 `PCA聚类方法 / alpha_tgt / prototype mixture / me_block / memory_image` 已退出训练主线。
+- `FUTURE_STEPS = 10`
+- action target = step delta / `DELTA_QPOS_SCALE`
+- `DELTA_QPOS_SCALE = 10.0`
+- `NUM_EPOCHS = 25`
+- no smoothing filter in preprocessing
+- motion filter threshold = `DISTANCE_THRESHOLD = 10`
+- gripper `j10` amplification scale = `1.4`
 
-## 一眼看懂当前开关
+## Dataset Contract
 
-最关键的总开关在 [config.py](./config.py)：
-
-```python
-USE_PHASE_PCA_SUPERVISION = False   # baseline
-USE_PHASE_PCA_SUPERVISION = True    # PCA正交分解方法
-```
-
-当它为：
-
-- `False`
-  - 不需要 `phase_pca16_targets.npz`
-  - 不需要 PCA bank
-  - 不加载 phase token / PCA head
-  - loss 只用 `recon_l1 + kl`
-
-- `True`
-  - 需要 `phase_pca16_targets.npz`
-  - 需要 `_phase_pca16/phase_pca16_bank.npz`
-  - 启用 phase token / PCA head / residual head
-  - loss 用 `recon_l1 + residual_l1 + pca_coord_mse + kl`
-
-## 数据目录
-
-训练数据根目录默认是：
-
-```text
-data_process/data/
-```
-
-### Baseline 所需文件
+Each task directory must contain:
 
 ```text
 task_xxx/
-  four_channel/
   states_filtered.csv
+  rgb/
+  depth/
+  depth_normalized/
+  four_channel/
 ```
 
-### PCA 正交分解方法额外所需文件
+For Phase-PCA modes, each task also needs the matching target file:
 
 ```text
 task_xxx/
-  four_channel/
-  states_filtered.csv
+  phase_pca8_targets.npz
   phase_pca16_targets.npz
-
-data_process/data/
-  _phase_pca16/
-    phase_pca16_bank.npz
+  phase_pca32_targets.npz
 ```
 
-其中：
+The dataset root also needs PCA banks:
 
-- `four_channel/*.png` 是 OpenCV 口径 `BGRA`
-- `states_filtered.csv` 至少包含：
-  - `frame`
-  - `j1 j2 j3 j4 j5 j10`
-- `phase_pca16_targets.npz` 包含：
-  - `frame_index`
-  - `pca_coord_tgt`
-  - `pca_recon_tgt`
-  - `residual_tgt`
+```text
+dataset/
+  _phase_pca8/phase_pca8_bank.npz
+  _phase_pca16/phase_pca16_bank.npz
+  _phase_pca32/phase_pca32_bank.npz
+```
 
-全局 bank `phase_pca16_bank.npz` 包含：
+`phase_pca*_targets.npz` contains:
+
+- `frame_index`
+- `pca_coord_tgt`
+- `pca_recon_tgt`
+- `residual_tgt`
+
+`phase_pca*_bank.npz` contains:
 
 - `pca_mean`
 - `pca_components`
-- `pca_coord_mean/std`
-- `residual_mean/std`
+- `pca_coord_mean`
+- `pca_coord_std`
+- `residual_mean`
+- `residual_std`
 - `explained_ratio`
+- `pca_dim`
+- `future_steps`
+- `state_dim`
+- `target_mode`
+- `delta_qpos_scale`
 
-## 训练
+## Preprocess Data
 
-先把 [config.py](./config.py) 里的：
+Run the canonical preparation pipeline:
 
-- `DATA_ROOT`
+```bash
+python prepare_act_data.py --data-root /path/to/dataset --future-steps 10
+```
+
+This does:
+
+1. clean raw `states.csv` when needed;
+2. sync/filter trajectory and images when the task is still raw;
+3. rebuild `four_channel` images;
+4. amplify `j10` around the global mean by `1.4`;
+5. validate the final training contract.
+
+Prepared tasks are protected from accidental second filtering. If `states_filtered.csv`, `rgb`, `depth`, and `depth_normalized` are already aligned, the filter stage is skipped and only safe final stages are rebuilt.
+
+Build Phase-PCA supervision:
+
+```bash
+python tools/build_phase_pca_bank_and_targets.py \
+  --data-root /path/to/dataset \
+  --output-bank /path/to/dataset/_phase_pca8/phase_pca8_bank.npz \
+  --pca-dim 8 \
+  --future-steps 10 \
+  --image-channels 4 \
+  --target-mode delta \
+  --delta-qpos-scale 10 \
+  --target-filename phase_pca8_targets.npz
+```
+
+Repeat with `8`, `16`, and `32`.
+
+Validate Phase-PCA targets:
+
+```bash
+python tools/validate_phase_pca_targets.py \
+  --data-root /path/to/dataset \
+  --target-filename phase_pca8_targets.npz \
+  --future-steps 10 \
+  --target-mode delta \
+  --delta-qpos-scale 10 \
+  --output-json /path/to/dataset/_phase_pca8/phase_pca8_validation.json
+```
+
+Generate paper / sanity-check figures:
+
+```bash
+python tools/visualize_prepared_dataset_report.py \
+  --data-root /path/to/dataset \
+  --output-dir /path/to/dataset/_paper_report \
+  --pca-dims 8,16,32 \
+  --future-steps 10 \
+  --delta-scale 10
+```
+
+## Training Modes
+
+You can still edit `config.py` directly, but for paper runs prefer CLI overrides so every experiment is explicit.
+
+Baseline ACT:
+
+```bash
+python training.py \
+  --method baseline \
+  --data-root /path/to/dataset \
+  --exp-name paper_baseline_e25 \
+  --num-epochs 25
+```
+
+PCA-residual:
+
+```bash
+python training.py \
+  --method pca-residual \
+  --data-root /path/to/dataset \
+  --phase-pca-dim 16 \
+  --phase-bank-path /path/to/dataset/_phase_pca16/phase_pca16_bank.npz \
+  --phase-targets-filename phase_pca16_targets.npz \
+  --exp-name paper_pca16res_e25 \
+  --num-epochs 25
+```
+
+PCA-only:
+
+```bash
+python training.py \
+  --method pca-only \
+  --data-root /path/to/dataset \
+  --phase-pca-dim 16 \
+  --phase-bank-path /path/to/dataset/_phase_pca16/phase_pca16_bank.npz \
+  --phase-targets-filename phase_pca16_targets.npz \
+  --exp-name paper_pca16only_e25 \
+  --num-epochs 25
+```
+
+Run all seven paper experiments serially:
+
+```bash
+cd /home/ubuntu/code_projects/memory_enhanced_act
+export DATA_ROOT=/home/ubuntu/code_projects/memory_enhanced_act/data_process/data
+bash scripts/run_paper_experiments.sh
+```
+
+The script runs:
+
+- `paper_baseline_e25`
+- `paper_pca8res_e25`
+- `paper_pca16res_e25`
+- `paper_pca32res_e25`
+- `paper_pca8only_e25`
+- `paper_pca16only_e25`
+- `paper_pca32only_e25`
+
+You can override common hyperparameters through env vars, for example:
+
+```bash
+EPOCHS=25 BATCH_SIZE=16 QPOS_NOISE_STD=2.0 bash scripts/run_paper_experiments.sh
+```
+
+## Loss Definitions
+
+Baseline:
+
+```text
+loss = RECON_LOSS_WEIGHT * recon_l1
+     + KL_WEIGHT * kl
+```
+
+PCA-residual:
+
+```text
+loss = RECON_LOSS_WEIGHT * recon_l1
+     + RESIDUAL_LOSS_WEIGHT * residual_l1
+     + PCA_COORD_LOSS_WEIGHT * pca_coord_mse
+     + KL_WEIGHT * kl
+```
+
+PCA-only:
+
+```text
+loss = RECON_LOSS_WEIGHT * recon_l1
+     + PCA_COORD_LOSS_WEIGHT * pca_coord_mse
+     + KL_WEIGHT * kl
+```
+
+`recon_l1` always supervises the final action sequence. `pca_coord_mse` supervises normalized PCA coordinates. `residual_l1` is used only when `USE_RESIDUAL_ACTION=True`.
+
+## Important Config Groups
+
+Baseline / method switches:
+
 - `USE_PHASE_PCA_SUPERVISION`
-- `PHASE_BANK_PATH`（只在 PCA 方法下需要）
+- `USE_PHASE_TOKEN`
+- `USE_RESIDUAL_ACTION`
 
-改到你的实际路径 / 方案，然后直接跑：
+Training hyperparameters:
 
-```powershell
-python training.py
-```
+- `NUM_EPOCHS`
+- `BATCH_SIZE`
+- `NUM_WORKERS`
+- `LR`
+- `LR_BACKBONE`
+- `KL_WEIGHT`
+- `RECON_LOSS_WEIGHT`
+- `PCA_COORD_LOSS_WEIGHT`
+- `RESIDUAL_LOSS_WEIGHT`
 
-日志会写到：
+Architecture:
 
-```text
-log/exp_YYYYMMDD_HHMMSS/
-```
+- `BACKBONE`
+- `ENC_LAYERS_ENC`
+- `ENC_LAYERS`
+- `DEC_LAYERS`
+- `HIDDEN_DIM`
+- `DIM_FEEDFORWARD`
+- `NHEADS`
+- `PCA_HEAD_HIDDEN_DIM`
+- `PCA_HEAD_DEPTH`
 
-主要输出：
+Preprocessing-coupled settings. Do not casually change without rebuilding data / PCA targets:
 
-- `config.json`
-- `metrics.jsonl`
-- `training_curves.png`
-- `ckpt_epoch_X.pth`
-- `best_model.pth`
+- `FUTURE_STEPS`
+- `PREDICT_DELTA_QPOS`
+- `DELTA_QPOS_SCALE`
+- `IMAGE_CHANNELS`
+- `PHASE_PCA_DIM`
+- `PHASE_TARGETS_FILENAME`
+- `PHASE_BANK_PATH`
 
-## 当前损失口径
+## Qpos Input Noise
 
-### Baseline
+`QPOS_INPUT_NOISE_STD_PULSE` adds small Gaussian noise to the current `qpos(t)` input during training only.
 
-- `recon_l1`
-- `kl`
+- Unit is raw servo pulse, not normalized 0-1 space.
+- Labels stay clean.
+- Validation, export, and deploy do not add this noise.
+- Current default is `2.0` pulses with clipping at `5.0` std.
 
-总损失：
+## Export
 
-```text
-loss = RECON_LOSS_WEIGHT * recon_l1 + KL_WEIGHT * kl
-```
+Export follows checkpoint mode automatically:
 
-### PCA 正交分解方法
-
-- `recon_l1`
-- `residual_l1`
-- `pca_coord_mse`
-- `kl`
-
-总损失：
-
-```text
-loss =
-    RECON_LOSS_WEIGHT * recon_l1
-  + RESIDUAL_LOSS_WEIGHT * residual_l1
-  + PCA_COORD_LOSS_WEIGHT * pca_coord_mse
-  + KL_WEIGHT * kl
-```
-
-其中：
-
-- `pca_coord` 和 `residual` 都用 bank 中的 `mean/std` 做归一化监督
-- `recon_l1` 始终在原动作空间监督最终动作
-
-## Deploy / 导出
-
-当前 deploy 走**同一套单图 ACT 导出路径**，兼容两种训练模型：
-
-- baseline checkpoint
-- PCA 正交分解 checkpoint
-
-导出命令：
-
-```powershell
-python deploy/export_torchscript_models.py `
-  --act-checkpoint .\log\exp_xxx\best_model.pth `
-  --output-dir .\deploy_artifacts_baseline `
+```bash
+python deploy/export_torchscript_models.py \
+  --act-checkpoint ./log/exp_xxx/best_model.pth \
+  --output-dir ./deploy_artifacts_xxx \
   --smoke-test
 ```
 
-导出目录包含：
+Force PCA-only export from a PCA-residual checkpoint:
 
-- `act_inference.pt`
-- `deploy_config.yml`
+```bash
+python deploy/export_torchscript_models.py \
+  --act-checkpoint ./log/exp_xxx/best_model.pth \
+  --phase-bank-path /path/to/dataset/_phase_pca8/phase_pca8_bank.npz \
+  --output-dir ./deploy_artifacts_pca8_only \
+  --pca-only \
+  --smoke-test
+```
 
-`deploy_config.yml` 里现在会显式写出：
+The exported `deploy_config.yml` records:
 
 - `use_phase_pca_supervision`
 - `use_phase_token`
+- `use_residual_action`
+- `pca_only`
 - `phase_pca_dim`
 - `predict_delta_qpos`
 - `delta_qpos_scale`
 
-也就是说，同一个 deploy 导出入口会自动跟随 checkpoint：
-
-- baseline 模型：导出 baseline 推理逻辑
-- PCA 模型：导出 `pca_recon + residual` 推理逻辑
+The ROS deploy node reads the same artifact shape for baseline, PCA-residual, and PCA-only.

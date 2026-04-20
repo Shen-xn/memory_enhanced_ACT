@@ -98,6 +98,7 @@ class MeActInferenceNodePy(Node):
         self._request_timeout_ids: set[int] = set()
         self._collection_enabled = False
         self._logged_first_image = False
+        self._trajectory_votes: deque[np.ndarray] = deque()
 
         self._declare_parameters()
         self._load_parameters()
@@ -151,6 +152,10 @@ class MeActInferenceNodePy(Node):
         self.get_logger().info(f"max_rgb_depth_skew_ms={self.max_rgb_depth_skew_ms}")
         self.get_logger().info(f"max_img_state_skew_ms={self.max_img_state_skew_ms}")
         self.get_logger().info(f"command_duration_ms={self.command_duration_ms}")
+        self.get_logger().info(
+            "temporal_agg=%s decay=%.3f"
+            % ("on" if self.temporal_agg_enabled else "off", self.temporal_agg_decay)
+        )
         self.get_logger().info("=" * 72)
 
     def _declare_parameters(self) -> None:
@@ -175,6 +180,8 @@ class MeActInferenceNodePy(Node):
         self.declare_parameter("max_img_state_skew_ms", 25)
         self.declare_parameter("max_rgb_depth_skew_ms", 25)
         self.declare_parameter("loop_sleep_ms", 1)
+        self.declare_parameter("temporal_agg_enabled", False)
+        self.declare_parameter("temporal_agg_decay", 0.7)
         self.declare_parameter("servo_ids", [1, 2, 3, 4, 5, 10])
         self.declare_parameter("init_center", [500, 500, 180, 190, 500, 300])
         self.declare_parameter("init_random_range", 40)
@@ -203,6 +210,8 @@ class MeActInferenceNodePy(Node):
         self.max_img_state_skew_ms = int(self.get_parameter("max_img_state_skew_ms").value)
         self.max_rgb_depth_skew_ms = int(self.get_parameter("max_rgb_depth_skew_ms").value)
         self.loop_sleep_ms = int(self.get_parameter("loop_sleep_ms").value)
+        self.temporal_agg_enabled = bool(self.get_parameter("temporal_agg_enabled").value)
+        self.temporal_agg_decay = float(self.get_parameter("temporal_agg_decay").value)
         self.servo_ids = [int(v) for v in self.get_parameter("servo_ids").value]
         self.init_center = [int(v) for v in self.get_parameter("init_center").value]
         self.init_random_range = int(self.get_parameter("init_random_range").value)
@@ -210,6 +219,8 @@ class MeActInferenceNodePy(Node):
         self.physical_max = [int(v) for v in self.get_parameter("physical_max").value]
 
         self.servo_poll_period_ns = int(1e9 / max(self.servo_poll_hz, 1e-6))
+        if self.temporal_agg_decay < 0.0 or self.temporal_agg_decay > 1.0:
+            raise RuntimeError("temporal_agg_decay must be in [0, 1].")
 
     def _now_ns(self) -> int:
         return int(self.get_clock().now().nanoseconds)
@@ -232,6 +243,9 @@ class MeActInferenceNodePy(Node):
         if not enabled:
             self.frame_queue.clear()
             self.servo_cache.clear()
+
+    def _reset_temporal_aggregation(self) -> None:
+        self._trajectory_votes.clear()
 
     def _on_synced_images(self, rgb_msg: Image, depth_msg: Image) -> None:
         if not self._collection_enabled or self._state != RunState.RUNNING:
@@ -439,13 +453,14 @@ class MeActInferenceNodePy(Node):
             self.get_logger().error("ACT returned empty trajectory or wrong action dimension. Entering FAULT.")
             return
 
-        self._publish_servo_command(trajectory[0], self.command_duration_ms, sample.servo.observed)
+        command, temporal_meta = self._select_command_from_trajectory(trajectory)
+        self._publish_servo_command(command, self.command_duration_ms, sample.servo.observed)
         self._cycle_counter += 1
         rgb_depth_skew_ms = abs(sample.frame.rgb_stamp_ns - sample.frame.depth_stamp_ns) / 1e6
         img_state_skew_ms = abs(sample.servo.state_est_stamp_ns - sample.frame.synced_stamp_ns) / 1e6
         cycle_ms = (now_ns() - cycle_started_ns) / 1e6
         self.get_logger().info(
-            "cycle=%d frame=%d rgb_depth=%.1fms img_state=%.1fms servo_rr=%.1fms infer+publish=%.1fms qpos=[%s] cmd0=[%s]"
+            "cycle=%d frame=%d rgb_depth=%.1fms img_state=%.1fms servo_rr=%.1fms infer+publish=%.1fms qpos=[%s] raw_cmd0=[%s] send=[%s] %s"
             % (
                 self._cycle_counter,
                 sample.frame.frame_id,
@@ -455,9 +470,47 @@ class MeActInferenceNodePy(Node):
                 cycle_ms,
                 self._join_vector(f"{v:.1f}" for v in sample.servo.qpos),
                 self._join_vector(f"{v:.1f}" for v in trajectory[0]),
+                self._join_vector(f"{v:.1f}" for v in command),
+                temporal_meta,
             )
         )
         self._set_collection_enabled(True)
+
+    def _select_command_from_trajectory(self, trajectory: list[list[float]]) -> tuple[list[float], str]:
+        if not self.temporal_agg_enabled:
+            return trajectory[0], "temporal=off"
+
+        current = np.asarray(trajectory, dtype=np.float32)
+        if current.ndim != 2 or current.shape[1] != len(self.servo_ids):
+            raise ValueError(f"Bad trajectory shape for temporal aggregation: {current.shape}")
+
+        if self._trajectory_votes.maxlen != current.shape[0]:
+            self._trajectory_votes = deque(self._trajectory_votes, maxlen=current.shape[0])
+        self._trajectory_votes.appendleft(current)
+
+        votes = []
+        weights = []
+        for age, past_trajectory in enumerate(self._trajectory_votes):
+            if age >= past_trajectory.shape[0]:
+                continue
+            weight = float(self.temporal_agg_decay ** age)
+            if weight <= 0.0:
+                continue
+            votes.append(past_trajectory[age])
+            weights.append(weight)
+
+        if not votes:
+            return trajectory[0], "temporal=empty_fallback"
+
+        vote_array = np.stack(votes, axis=0)
+        weight_array = np.asarray(weights, dtype=np.float32).reshape(-1, 1)
+        command = (vote_array * weight_array).sum(axis=0) / max(float(weight_array.sum()), 1e-6)
+        meta = "temporal=on votes=%d decay=%.3f weights=[%s]" % (
+            len(votes),
+            self.temporal_agg_decay,
+            self._join_vector(f"{w:.3f}" for w in weights),
+        )
+        return command.astype(np.float32).tolist(), meta
 
     def _publish_servo_command(
         self,
@@ -491,6 +544,7 @@ class MeActInferenceNodePy(Node):
             response.message = "Node is initializing. Wait until initialization finishes."
             return response
         self._state = RunState.RUNNING
+        self._reset_temporal_aggregation()
         self._set_collection_enabled(True)
         response.success = True
         response.message = "Inference started."
@@ -499,6 +553,7 @@ class MeActInferenceNodePy(Node):
     def _handle_stop(self, request, response):
         del request
         self._state = RunState.IDLE
+        self._reset_temporal_aggregation()
         self._set_collection_enabled(False)
         response.success = True
         response.message = "Inference stopped."
@@ -507,6 +562,7 @@ class MeActInferenceNodePy(Node):
     def _handle_estop(self, request, response):
         del request
         self._state = RunState.ESTOP
+        self._reset_temporal_aggregation()
         self._set_collection_enabled(False)
         response.success = True
         response.message = "Emergency stop activated. No more motion commands will be sent."
@@ -520,6 +576,7 @@ class MeActInferenceNodePy(Node):
             self._publish_servo_command(pose, self.init_command_duration_ms)
             self._last_known_qpos = list(pose)
             self.pipeline.reset_memory()
+            self._reset_temporal_aggregation()
             self._initialize_until_ns = self._now_ns() + (self.init_command_duration_ms + 300) * 1_000_000
             self._state = RunState.INITIALIZING
             self._set_collection_enabled(False)
@@ -546,6 +603,7 @@ class MeActInferenceNodePy(Node):
             if self._state == RunState.INITIALIZING:
                 if self._now_ns() >= self._initialize_until_ns:
                     self.pipeline.reset_memory()
+                    self._reset_temporal_aggregation()
                     self._state = RunState.RUNNING
                     self._set_collection_enabled(True)
                     self.get_logger().info("Initialization finished. Switching to RUNNING.")

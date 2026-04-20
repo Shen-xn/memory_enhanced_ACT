@@ -21,6 +21,7 @@ class ACTSingleImageInferenceWrapper(nn.Module):
         image_channels: int = 4,
         predict_delta_qpos: bool = False,
         delta_qpos_scale: float = 10.0,
+        use_residual_action: bool = True,
     ):
         super().__init__()
         if image_channels not in (3, 4):
@@ -28,6 +29,7 @@ class ACTSingleImageInferenceWrapper(nn.Module):
         self.model = model.eval()
         self.image_channels = int(image_channels)
         self.predict_delta_qpos = bool(predict_delta_qpos)
+        self.use_residual_action = bool(use_residual_action)
         self.register_buffer("joint_min", _tensor_1d(joint_min).view(1, -1))
         self.register_buffer("joint_rng", _tensor_1d(joint_rng).view(1, -1))
         self.register_buffer("delta_qpos_scale", torch.tensor(float(delta_qpos_scale), dtype=torch.float32))
@@ -59,5 +61,10 @@ class ACTSingleImageInferenceWrapper(nn.Module):
         qpos_raw = qpos
         qpos = self._normalize_qpos(qpos)
         image = self._normalize_bgra_image(image_bgra).unsqueeze(1)
-        actions, _, _, _ = self.model(qpos, image, None)
+        actions, _, _, aux = self.model(qpos, image, None)
+        if not self.use_residual_action:
+            pca_recon_action = aux["pca_recon_action"]
+            if pca_recon_action is None:
+                raise RuntimeError("pca-only export requires a phase-PCA model.")
+            actions = pca_recon_action
         return self._decode_actions(qpos_raw, actions)

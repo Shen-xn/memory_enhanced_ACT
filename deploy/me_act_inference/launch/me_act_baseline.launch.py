@@ -9,6 +9,11 @@ def generate_launch_description():
     return LaunchDescription(
         [
             DeclareLaunchArgument(
+                "deploy_dir",
+                default_value="/home/ubuntu/my_models/me_act/deploy_artifacts_baseline",
+                description="Directory containing act_inference.pt and deploy_config.yml.",
+            ),
+            DeclareLaunchArgument(
                 "device",
                 default_value="cuda",
                 description="Torch device used by ACT. Use cpu only for debugging.",
@@ -35,7 +40,7 @@ def generate_launch_description():
                 output="screen",
                 parameters=[
                     {
-                        "deploy_dir": "/home/ubuntu/my_models/me_act/deploy_artifacts_baseline",
+                        "deploy_dir": LaunchConfiguration("deploy_dir"),
                         "device": LaunchConfiguration("device"),
                         "rgb_topic": "/depth_cam/rgb/image_raw",
                         "depth_topic": "/depth_cam/depth/image_raw",

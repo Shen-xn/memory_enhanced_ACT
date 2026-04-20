@@ -33,6 +33,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--act-checkpoint", type=str, required=True, help="Path to ACT checkpoint (.pth).")
     parser.add_argument("--output-dir", type=str, required=True, help="Directory for exported deployment artifacts.")
     parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"])
+    parser.add_argument(
+        "--phase-bank-path",
+        type=str,
+        default="",
+        help="Optional local phase PCA bank path used when exporting checkpoints trained on another machine.",
+    )
+    parser.add_argument(
+        "--pca-only",
+        action="store_true",
+        help="For phase-PCA checkpoints, ignore the residual branch and export pca_recon only.",
+    )
     parser.add_argument("--smoke-test", action="store_true")
     return parser.parse_args()
 
@@ -44,6 +55,23 @@ def _pick(payload: Dict, key: str, default=None):
     return model_params.get(key, default)
 
 
+def _infer_phase_pca_enabled(payload: Dict) -> bool:
+    """Keep old ACT checkpoints exportable after the phase-PCA refactor.
+
+    Older experiments predate USE_PHASE_PCA_SUPERVISION and may contain
+    prototype-related config fields. Those checkpoints are still plain ACT
+    unless they explicitly saved phase-PCA fields or a phase bank path.
+    """
+    model_params = payload.get("MODEL_PARAMS") or {}
+    if "USE_PHASE_PCA_SUPERVISION" in payload:
+        return bool(payload["USE_PHASE_PCA_SUPERVISION"])
+    if "use_phase_pca_supervision" in model_params:
+        return bool(model_params["use_phase_pca_supervision"])
+    if payload.get("PHASE_BANK_PATH") or model_params.get("phase_bank_path"):
+        return True
+    return False
+
+
 def normalize_act_config(payload: Dict) -> Dict:
     image_channels = payload.get("IMAGE_CHANNELS", _pick(payload, "image_channels"))
     if image_channels is None:
@@ -51,6 +79,8 @@ def normalize_act_config(payload: Dict) -> Dict:
     image_channels = int(image_channels)
     if image_channels not in (3, 4):
         raise ValueError(f"Unsupported ACT image_channels={image_channels}; expected 3 or 4.")
+
+    use_phase_pca_supervision = _infer_phase_pca_enabled(payload)
 
     return {
         "lr": payload.get("LR", 1e-4),
@@ -78,8 +108,9 @@ def normalize_act_config(payload: Dict) -> Dict:
         "nheads": payload.get("NHEADS", _pick(payload, "nheads", 8)),
         "num_queries": payload.get("NUM_QUERIES", _pick(payload, "num_queries", payload.get("FUTURE_STEPS", 10))),
         "state_dim": payload.get("STATE_DIM", _pick(payload, "state_dim", 6)),
-        "use_phase_pca_supervision": payload.get("USE_PHASE_PCA_SUPERVISION", _pick(payload, "use_phase_pca_supervision", True)),
-        "use_phase_token": payload.get("USE_PHASE_TOKEN", _pick(payload, "use_phase_token", True)),
+        "use_phase_pca_supervision": use_phase_pca_supervision,
+        "use_phase_token": bool(payload.get("USE_PHASE_TOKEN", _pick(payload, "use_phase_token", True))) and use_phase_pca_supervision,
+        "use_residual_action": bool(payload.get("USE_RESIDUAL_ACTION", _pick(payload, "use_residual_action", True))),
         "phase_bank_path": payload.get("PHASE_BANK_PATH", _pick(payload, "phase_bank_path", "")),
         "phase_pca_dim": payload.get("PHASE_PCA_DIM", _pick(payload, "phase_pca_dim", 16)),
         "pca_head_hidden_dim": payload.get("PCA_HEAD_HIDDEN_DIM", _pick(payload, "pca_head_hidden_dim", 1024)),
@@ -101,12 +132,25 @@ def normalize_act_config(payload: Dict) -> Dict:
     }
 
 
-def load_act_policy(checkpoint_path: str, device: torch.device) -> Tuple[ACTPolicy, Dict]:
+def load_act_policy(checkpoint_path: str, device: torch.device, phase_bank_path: str = "") -> Tuple[ACTPolicy, Dict]:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     args_override = normalize_act_config(checkpoint["config"])
+    if phase_bank_path:
+        args_override["phase_bank_path"] = phase_bank_path
     policy = ACTPolicy(args_override, device=device).eval()
-    policy.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    state_dict = _convert_legacy_state_dict(checkpoint["model_state_dict"])
+    policy.load_state_dict(state_dict, strict=True)
     return policy, checkpoint["config"]
+
+
+def _convert_legacy_state_dict(state_dict: Dict) -> Dict:
+    """Map pre-refactor baseline ACT key names to the current module names."""
+    if "model.action_head.weight" not in state_dict or "model.residual_head.weight" in state_dict:
+        return state_dict
+    converted = dict(state_dict)
+    converted["model.residual_head.weight"] = converted.pop("model.action_head.weight")
+    converted["model.residual_head.bias"] = converted.pop("model.action_head.bias")
+    return converted
 
 
 def _trace_and_save(module: torch.nn.Module, example_inputs: Tuple[torch.Tensor, ...], output_path: str) -> None:
@@ -132,9 +176,18 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    act_policy, act_config = load_act_policy(args.act_checkpoint, device=device)
+    act_policy, act_config = load_act_policy(args.act_checkpoint, device=device, phase_bank_path=args.phase_bank_path)
     normalized_act_config = normalize_act_config(act_config)
     image_channels = int(normalized_act_config["image_channels"])
+    state_dim = int(normalized_act_config["state_dim"])
+    use_phase_pca = bool(normalized_act_config["use_phase_pca_supervision"])
+    use_residual_action = bool(normalized_act_config["use_residual_action"])
+    if args.pca_only:
+        use_residual_action = False
+    if args.pca_only and not use_phase_pca:
+        raise ValueError("--pca-only requires a checkpoint with USE_PHASE_PCA_SUPERVISION enabled.")
+    if use_residual_action and getattr(act_policy.model, "residual_head", None) is None:
+        raise ValueError("This checkpoint has no residual head. Export it with --pca-only.")
     joint_stats = get_fixed_joint_stats()
 
     act_wrapper = ACTSingleImageInferenceWrapper(
@@ -144,9 +197,10 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
         image_channels=image_channels,
         predict_delta_qpos=bool(normalized_act_config["predict_delta_qpos"]),
         delta_qpos_scale=float(normalized_act_config["delta_qpos_scale"]),
+        use_residual_action=use_residual_action,
     ).to(device)
     act_examples = (
-        torch.zeros(1, act_policy.model.residual_head.out_features, device=device),
+        torch.zeros(1, state_dim, device=device),
         torch.zeros(1, 4, TARGET_HEIGHT, TARGET_WIDTH, device=device),
     )
     act_output_path = str(output_dir / "act_inference.pt")
@@ -159,12 +213,14 @@ def export_artifacts(args: argparse.Namespace) -> Dict:
         "pad_top": int(PAD_TOP),
         "depth_clip_min": float(DEPTH_CLIP_MIN),
         "depth_clip_max": float(DEPTH_CLIP_MAX),
-        "state_dim": int(act_policy.model.residual_head.out_features),
+        "state_dim": int(state_dim),
         "num_queries": int(act_policy.model.num_queries),
         "image_channels": int(image_channels),
-        "use_phase_pca_supervision": bool(normalized_act_config["use_phase_pca_supervision"]),
+        "use_phase_pca_supervision": use_phase_pca,
         "use_phase_token": bool(normalized_act_config["use_phase_token"]),
         "phase_pca_dim": int(normalized_act_config["phase_pca_dim"]),
+        "use_residual_action": bool(use_residual_action),
+        "pca_only": bool(use_phase_pca and not use_residual_action),
         "predict_delta_qpos": bool(normalized_act_config["predict_delta_qpos"]),
         "delta_qpos_scale": float(normalized_act_config["delta_qpos_scale"]),
         "preprocessed_channel_order": "BGRA",

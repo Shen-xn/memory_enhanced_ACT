@@ -20,6 +20,7 @@ class ACTPolicy(nn.Module):
         self.optimizer = optimizer
         self.kl_weight = float(args_override["kl_weight"])
         self.use_phase_pca_supervision = bool(args_override.get("use_phase_pca_supervision", True))
+        self.use_residual_action = bool(args_override.get("use_residual_action", True))
         self.pca_coord_loss_weight = float(args_override.get("pca_coord_loss_weight", 0.1))
         self.residual_loss_weight = float(args_override.get("residual_loss_weight", 1.0))
         self.recon_loss_weight = float(args_override.get("recon_loss_weight", 1.0))
@@ -88,12 +89,13 @@ class ACTPolicy(nn.Module):
             recon_l1 = (F.l1_loss(actions, action_hat, reduction="none") * valid_mask).mean()
             if self.use_phase_pca_supervision:
                 pca_coord_targets_norm = self.model.normalize_pca_coords(pca_coord_targets)
-                residual_targets_norm = self.model.normalize_residual(residual_targets)
-
-                residual_l1 = (
-                    F.l1_loss(aux["residual_norm"], residual_targets_norm, reduction="none") * valid_mask
-                ).mean()
                 pca_coord_mse = F.mse_loss(aux["pca_coord_norm"], pca_coord_targets_norm)
+                residual_l1 = recon_l1.new_zeros(())
+                if self.use_residual_action:
+                    residual_targets_norm = self.model.normalize_residual(residual_targets)
+                    residual_l1 = (
+                        F.l1_loss(aux["residual_norm"], residual_targets_norm, reduction="none") * valid_mask
+                    ).mean()
 
                 loss_dict = {
                     "recon_l1": recon_l1,

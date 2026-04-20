@@ -23,6 +23,12 @@ class Config:
       - IMAGE_CHANNELS
       - PHASE_TARGETS_FILENAME
       - PHASE_BANK_PATH
+    - train-time augmentation:
+      - QPOS_INPUT_NOISE_STD_PULSE
+    - method variant:
+      - baseline: USE_PHASE_PCA_SUPERVISION=False
+      - PCA-residual: USE_PHASE_PCA_SUPERVISION=True, USE_RESIDUAL_ACTION=True
+      - PCA-only: USE_PHASE_PCA_SUPERVISION=True, USE_RESIDUAL_ACTION=False
     """
 
     def __init__(self):
@@ -70,6 +76,12 @@ class Config:
         self.PREDICT_DELTA_QPOS = True
         self.DELTA_QPOS_SCALE = 10.0
 
+        # Train-only proprioception augmentation. This adds small Gaussian
+        # noise to the current qpos input in raw pulse units, then normalizes it.
+        # Future action labels stay clean. Validation and deploy do not use it.
+        self.QPOS_INPUT_NOISE_STD_PULSE = 2.0
+        self.QPOS_INPUT_NOISE_CLIP_STD = 5.0
+
         # ----------------------------
         # Method toggle
         # ----------------------------
@@ -80,7 +92,9 @@ class Config:
         #   - no phase_pca16_targets.npz dependency
         # True:
         #   PCA orthogonal decomposition method
-        # - no phase token
+        #   - optional phase token
+        #   - PCA coordinate supervision
+        #   - optional residual action branch
         self.USE_PHASE_PCA_SUPERVISION = True
 
         # Offline supervision files used only when USE_PHASE_PCA_SUPERVISION=True.
@@ -98,7 +112,7 @@ class Config:
         # Training hyperparameters
         # ----------------------------
         # Safe to tune during experiments. No need to rebuild data.
-        self.NUM_EPOCHS = 40
+        self.NUM_EPOCHS = 25
         self.BATCH_SIZE = 16
         self.NUM_WORKERS = 16
 
@@ -109,7 +123,7 @@ class Config:
 
         # Total loss when USE_PHASE_PCA_SUPERVISION=True:
         #   RECON_LOSS_WEIGHT * recon_l1
-        # + RESIDUAL_LOSS_WEIGHT * residual_l1
+        # + RESIDUAL_LOSS_WEIGHT * residual_l1   (only when USE_RESIDUAL_ACTION=True)
         # + PCA_COORD_LOSS_WEIGHT * pca_coord_mse
         # + KL_WEIGHT * kl
         #
@@ -164,9 +178,16 @@ class Config:
         #
         # Main method:
         # - phase token enters encoder only
-        # - PCA head predicts 16D orthogonal coordinates
-        # - residual head predicts all-joint residual actions
+        # - PCA head predicts low-dimensional orthogonal coordinates
+        # - residual head optionally predicts all-joint residual actions
         self.USE_PHASE_TOKEN = True
+
+        # Only used when USE_PHASE_PCA_SUPERVISION=True.
+        # True  = PCA-residual: final action is pca_recon + residual.
+        # False = PCA-only: no residual head is created, no residual loss is used,
+        #         final action is pca_recon directly.
+        # Baseline ignores this switch and remains native ACT.
+        self.USE_RESIDUAL_ACTION = True
         self.PHASE_PCA_DIM = 8
 
         # PCA head is intentionally deeper than the residual head because
@@ -224,6 +245,7 @@ class Config:
             "delta_qpos_scale": self.DELTA_QPOS_SCALE,
             "use_phase_pca_supervision": self.USE_PHASE_PCA_SUPERVISION,
             "use_phase_token": self.USE_PHASE_TOKEN and self.USE_PHASE_PCA_SUPERVISION,
+            "use_residual_action": self.USE_RESIDUAL_ACTION if self.USE_PHASE_PCA_SUPERVISION else True,
             "phase_bank_path": self.PHASE_BANK_PATH,
             "phase_pca_dim": self.PHASE_PCA_DIM,
             "pca_head_hidden_dim": self.PCA_HEAD_HIDDEN_DIM,
@@ -263,6 +285,8 @@ class Config:
             self.PHASE_PCA_DIM = int(model_params["phase_pca_dim"])
         if "USE_PHASE_PCA_SUPERVISION" not in ckpt_config and "use_phase_pca_supervision" in model_params:
             self.USE_PHASE_PCA_SUPERVISION = bool(model_params["use_phase_pca_supervision"])
+        if "USE_RESIDUAL_ACTION" not in ckpt_config and "use_residual_action" in model_params:
+            self.USE_RESIDUAL_ACTION = bool(model_params["use_residual_action"])
         if "PCA_HEAD_HIDDEN_DIM" not in ckpt_config and "pca_head_hidden_dim" in model_params:
             self.PCA_HEAD_HIDDEN_DIM = int(model_params["pca_head_hidden_dim"])
         if "PCA_HEAD_DEPTH" not in ckpt_config and "pca_head_depth" in model_params:

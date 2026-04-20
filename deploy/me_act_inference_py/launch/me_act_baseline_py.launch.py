@@ -94,6 +94,16 @@ def generate_launch_description():
                 description="Sleep inserted at the end of each outer loop iteration.",
             ),
             DeclareLaunchArgument(
+                "temporal_agg_enabled",
+                default_value="false",
+                description="Enable temporal aggregation over current cmd0 and older future-step votes.",
+            ),
+            DeclareLaunchArgument(
+                "temporal_agg_decay",
+                default_value="0.7",
+                description="Vote decay in [0, 1]. Current cmd0 weight=1, previous cmd1=decay, previous previous cmd2=decay^2.",
+            ),
+            DeclareLaunchArgument(
                 "enable_inference_on_start",
                 default_value="false",
                 description="Start in RUNNING state immediately after launch.",
@@ -137,6 +147,8 @@ def generate_launch_description():
                         "max_img_state_skew_ms": ParameterValue(LaunchConfiguration("max_img_state_skew_ms"), value_type=int),
                         "max_rgb_depth_skew_ms": ParameterValue(LaunchConfiguration("max_rgb_depth_skew_ms"), value_type=int),
                         "loop_sleep_ms": ParameterValue(LaunchConfiguration("loop_sleep_ms"), value_type=int),
+                        "temporal_agg_enabled": ParameterValue(LaunchConfiguration("temporal_agg_enabled"), value_type=bool),
+                        "temporal_agg_decay": ParameterValue(LaunchConfiguration("temporal_agg_decay"), value_type=float),
                         "enable_inference_on_start": ParameterValue(LaunchConfiguration("enable_inference_on_start"), value_type=bool),
                         "validate_servo_ids": ParameterValue(LaunchConfiguration("validate_servo_ids"), value_type=bool),
                         "debug_dump_dir": LaunchConfiguration("debug_dump_dir"),
